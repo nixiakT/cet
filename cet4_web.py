@@ -1,13 +1,17 @@
 import re
 from collections import Counter
+from io import BytesIO
 from pathlib import Path
 from typing import Dict, List, Optional, Set
 
+from docx import Document
 from flask import Flask, jsonify, render_template, request
 from markupsafe import Markup, escape
+from pypdf import PdfReader
 
 WORD_FILE = Path(__file__).resolve().parent / "wordscheck" / "CET4_words_from_CET46_2016.csv"
 TOKEN_RE = re.compile(r"[A-Za-z]+(?:[-'][A-Za-z]+)*")
+SUPPORTED_EXTENSIONS = {".txt", ".docx", ".pdf"}
 
 TRANSLATION_TABLE = str.maketrans(
     {
@@ -135,6 +139,35 @@ def decode_uploaded_text(raw: bytes) -> str:
     return raw.decode("utf-8", errors="ignore")
 
 
+def extract_docx_text(raw: bytes) -> str:
+    document = Document(BytesIO(raw))
+    paragraphs = [paragraph.text for paragraph in document.paragraphs if paragraph.text]
+    return "\n".join(paragraphs)
+
+
+def extract_pdf_text(raw: bytes) -> str:
+    reader = PdfReader(BytesIO(raw))
+    pages = []
+    for page in reader.pages:
+        page_text = page.extract_text() or ""
+        if page_text:
+            pages.append(page_text)
+    return "\n".join(pages)
+
+
+def extract_text_from_upload(file_storage) -> str:
+    filename = (file_storage.filename or "").lower()
+    suffix = Path(filename).suffix
+    raw = file_storage.read()
+    if suffix == ".txt":
+        return decode_uploaded_text(raw)
+    if suffix == ".docx":
+        return extract_docx_text(raw)
+    if suffix == ".pdf":
+        return extract_pdf_text(raw)
+    return ""
+
+
 def contraction_bases(token: str) -> List[str]:
     if token in CONTRACTION_EXCEPTIONS:
         return CONTRACTION_EXCEPTIONS[token][:]
@@ -158,6 +191,7 @@ def stem_ly(token: str) -> Set[str]:
         candidates.add(base)
         if base.endswith("i") and len(base) > 1:
             candidates.add(base[:-1] + "y")
+        candidates.add(base + "le")
     return candidates
 
 
@@ -279,6 +313,14 @@ def highlight_missing(text: str) -> Markup:
     return Markup("".join(output))
 
 
+def build_api_results(text: str) -> Dict[str, object]:
+    results = build_results(text)
+    results["missing_items"] = [
+        {"word": word, "count": count} for word, count in results["missing_items"]
+    ]
+    return results
+
+
 def build_results(text: str) -> Dict[str, object]:
     tokens = extract_tokens(text)
     missing = []
@@ -306,17 +348,24 @@ def index() -> str:
     if request.method == "POST":
         file_storage = request.files.get("text_file")
         if file_storage and file_storage.filename:
-            raw = file_storage.read()
-            input_text = decode_uploaded_text(raw)
+            suffix = Path(file_storage.filename).suffix.lower()
+            if suffix not in SUPPORTED_EXTENSIONS:
+                error = "Unsupported file type. Please upload a .txt, .docx, or .pdf file."
+            else:
+                try:
+                    input_text = extract_text_from_upload(file_storage)
+                except Exception:
+                    error = "Failed to parse the file. Please try another file."
         else:
             input_text = request.form.get("text_input", "")
 
-        if not input_text.strip():
-            error = "Please upload a text file or paste some text."
-        elif not CET4_WORDS:
-            error = "CET4 word list not found."
-        else:
-            results = build_results(input_text)
+        if not error:
+            if not input_text.strip():
+                error = "Please upload a text file or paste some text."
+            elif not CET4_WORDS:
+                error = "CET4 word list not found."
+            else:
+                results = build_results(input_text)
 
     return render_template(
         "index.html",
@@ -351,10 +400,30 @@ def check() -> tuple[str, int]:
             200,
         )
 
-    results = build_results(text)
-    results["missing_items"] = [
-        {"word": word, "count": count} for word, count in results["missing_items"]
-    ]
+    results = build_api_results(text)
+    return jsonify(results), 200
+
+
+@app.route("/extract", methods=["POST"])
+def extract() -> tuple[str, int]:
+    if not CET4_WORDS:
+        return jsonify({"error": "CET4 word list not found."}), 500
+
+    file_storage = request.files.get("text_file")
+    if not file_storage or not file_storage.filename:
+        return jsonify({"error": "No file uploaded."}), 400
+
+    suffix = Path(file_storage.filename).suffix.lower()
+    if suffix not in SUPPORTED_EXTENSIONS:
+        return jsonify({"error": "Unsupported file type."}), 400
+
+    try:
+        text = extract_text_from_upload(file_storage)
+    except Exception:
+        return jsonify({"error": "Failed to parse the file."}), 400
+
+    results = build_api_results(text)
+    results["text"] = text
     return jsonify(results), 200
 
 

@@ -159,6 +159,17 @@
         cursor: pointer;
         box-shadow: 0 10px 20px rgba(11, 109, 107, 0.2);
       }
+      button.secondary {
+        background: #fff;
+        color: var(--accent-strong);
+        border: 1px solid #d7d1c7;
+        box-shadow: none;
+      }
+      button:disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
+        box-shadow: none;
+      }
       .note {
         font-size: 13px;
         color: var(--muted);
@@ -216,6 +227,12 @@
         font-family: "Courier New", monospace;
         font-size: 13px;
       }
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        margin-top: 18px;
+      }
       .highlight-block {
         margin-top: 24px;
       }
@@ -252,16 +269,16 @@
         <div>
           <div class="eyebrow">CET4 Word Checker</div>
           <h1>Spot the words beyond CET4.</h1>
-          <p>Upload a text file or paste text to find words outside the CET4 list, then refine with the highlighted view.</p>
+          <p>Upload a file or paste text to find words outside the CET4 list, then refine with the highlighted view.</p>
         </div>
         <div class="hero-card">
-          Upload any English text to get a clean list of non-CET4 words, plus an inline highlight for fast editing.
+          Upload .txt, .docx, or .pdf files to get a clean list of non-CET4 words, plus inline highlights for fast editing.
         </div>
       </header>
 
       <form class="panel" method="post" enctype="multipart/form-data">
-        <label for="text_file">Upload a .txt file (optional)</label>
-        <input id="text_file" name="text_file" type="file" accept=".txt">
+        <label for="text_file">Upload a .txt, .docx, or .pdf file (optional)</label>
+        <input id="text_file" name="text_file" type="file" accept=".txt,.docx,.pdf">
         <span class="note">If a file is uploaded, the pasted text below is ignored.</span>
 
         <label for="text_input">Paste text (optional)</label>
@@ -282,6 +299,7 @@
       {% if error %}
         <div class="error">{{ error }}</div>
       {% endif %}
+      <div id="client_error" class="error" style="display: none;"></div>
 
       <section id="results" class="results panel" {% if not results %}style="display: none;"{% endif %}>
           <div class="stats">
@@ -316,6 +334,10 @@
             <label for="unique_list">Unique words not in CET4</label>
             <textarea id="unique_list" class="unique-list" readonly>{{ results.unique_list if results else "" }}</textarea>
           </div>
+
+          <div class="actions">
+            <button id="download_btn" type="button" class="secondary" disabled>Download highlighted HTML</button>
+          </div>
         </section>
 
       <script>
@@ -330,12 +352,26 @@
         const resultsDetail = document.getElementById('results_detail');
         const missingTable = document.getElementById('missing_table_body');
         const uniqueList = document.getElementById('unique_list');
+        const clientError = document.getElementById('client_error');
+        const downloadButton = document.getElementById('download_btn');
 
         let debounceTimer = null;
         let lastRequestId = 0;
 
         function renderPlain(text) {
           highlightLayer.textContent = text;
+        }
+
+        function showClientError(message) {
+          if (!clientError) return;
+          clientError.textContent = message;
+          clientError.style.display = 'block';
+        }
+
+        function clearClientError() {
+          if (!clientError) return;
+          clientError.textContent = '';
+          clientError.style.display = 'none';
         }
 
         function syncScroll() {
@@ -352,9 +388,13 @@
           allGood.style.display = 'none';
           resultsDetail.style.display = 'none';
           resultsSection.style.display = 'none';
+          if (downloadButton) {
+            downloadButton.disabled = true;
+          }
         }
 
         function updateResults(data) {
+          clearClientError();
           statTotal.textContent = data.total_count;
           statMissing.textContent = data.missing_count;
           statUnique.textContent = data.unique_missing;
@@ -385,6 +425,9 @@
 
           uniqueList.value = data.unique_list || '';
           highlightLayer.innerHTML = data.highlighted || '';
+          if (downloadButton) {
+            downloadButton.disabled = !textInput.value.trim();
+          }
           syncScroll();
         }
 
@@ -393,6 +436,7 @@
           if (!text.trim()) {
             renderPlain(text);
             clearResults();
+            clearClientError();
             return;
           }
 
@@ -413,6 +457,7 @@
             updateResults(data);
           } catch (error) {
             renderPlain(text);
+            showClientError('Live check failed. Please try again.');
           }
         }
 
@@ -426,29 +471,64 @@
 
         textInput.addEventListener('scroll', syncScroll);
 
+        function buildExportHtml(highlightedHtml) {
+          return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>CET4 Highlighted Text</title>
+  <style>
+    body { font-family: "Source Sans 3", "Trebuchet MS", "Calibri", sans-serif; padding: 24px; color: #1c1b18; }
+    .content { white-space: pre-wrap; line-height: 1.7; }
+    .missing { background: #ffd27d; padding: 0 2px; border-radius: 4px; color: #3b2d19; }
+  </style>
+</head>
+<body>
+  <div class="content">${highlightedHtml}</div>
+</body>
+</html>`;
+        }
+
+        function downloadHighlighted() {
+          if (!textInput.value.trim()) {
+            return;
+          }
+          const html = buildExportHtml(highlightLayer.innerHTML);
+          const blob = new Blob([html], { type: 'text/html' });
+          const url = URL.createObjectURL(blob);
+          const link = document.createElement('a');
+          link.href = url;
+          link.download = 'cet4-highlighted.html';
+          document.body.appendChild(link);
+          link.click();
+          link.remove();
+          URL.revokeObjectURL(url);
+        }
+
+        if (downloadButton) {
+          downloadButton.addEventListener('click', downloadHighlighted);
+        }
+
         if (fileInput) {
           fileInput.addEventListener('change', async (event) => {
             const file = event.target.files[0];
             if (!file) return;
             try {
-              const buffer = await file.arrayBuffer();
-              let decoded = '';
-              try {
-                decoded = new TextDecoder('utf-8', { fatal: false }).decode(buffer);
-              } catch (error) {
-                decoded = '';
+              const formData = new FormData();
+              formData.append('text_file', file);
+              const response = await fetch('/extract', {
+                method: 'POST',
+                body: formData
+              });
+              const data = await response.json();
+              if (!response.ok) {
+                throw new Error(data.error || 'Upload failed.');
               }
-              if (decoded.includes('\uFFFD')) {
-                try {
-                  decoded = new TextDecoder('gbk', { fatal: false }).decode(buffer);
-                } catch (error) {
-                  decoded = decoded.replace(/\uFFFD/g, '');
-                }
-              }
-              textInput.value = decoded;
-              renderPlain(decoded);
-              runCheck();
+              textInput.value = data.text || '';
+              renderPlain(textInput.value);
+              updateResults(data);
             } catch (error) {
+              showClientError(error.message || 'Upload failed.');
               textInput.value = '';
               renderPlain('');
               clearResults();

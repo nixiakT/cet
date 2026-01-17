@@ -1,6 +1,6 @@
 # CET4 Word Checker
 
-Upload a `.txt` file or paste English text to list words not found in the CET4 vocabulary list.
+Upload a `.txt`, `.docx`, or `.pdf` file (or paste text) to list words not found in the CET4 vocabulary list.
 
 ## Run locally
 
