@@ -1,4 +1,3 @@
-import difflib
 import html
 import re
 from collections import Counter
@@ -10,6 +9,8 @@ from docx import Document
 from docx.enum.text import WD_COLOR_INDEX
 from flask import Flask, jsonify, render_template, request, send_file
 from markupsafe import Markup, escape
+import nltk
+from nltk.corpus import wordnet as wn
 from pypdf import PdfReader
 from reportlab.lib.pagesizes import LETTER
 from reportlab.lib.styles import ParagraphStyle
@@ -20,6 +21,7 @@ CET4_FILE = Path(__file__).resolve().parent / "wordscheck" / "CET4_words_from_CE
 CET6_FILE = Path(__file__).resolve().parent / "wordscheck" / "CET4+6_expanded_words_7952.csv"
 TOKEN_RE = re.compile(r"[A-Za-z]+(?:[-'][A-Za-z]+)*")
 SUPPORTED_EXTENSIONS = {".txt", ".docx", ".pdf"}
+NLTK_DATA_DIR = Path(__file__).resolve().parent / "nltk_data"
 
 TRANSLATION_TABLE = str.maketrans(
     {
@@ -48,6 +50,39 @@ def normalize_token(token: str) -> str:
 
 def normalize_segment_token(segment: str) -> str:
     return normalize_token(normalize_text(segment))
+
+
+VARIANT_EQUIVALENTS = (
+    ("practice", "practise"),
+    ("license", "licence"),
+    ("defense", "defence"),
+    ("offense", "offence"),
+    ("pretense", "pretence"),
+    ("analyze", "analyse"),
+    ("apologize", "apologise"),
+    ("organize", "organise"),
+    ("recognize", "recognise"),
+    ("realize", "realise"),
+    ("color", "colour"),
+    ("center", "centre"),
+    ("meter", "metre"),
+    ("liter", "litre"),
+    ("kilometer", "kilometre"),
+    ("theater", "theatre"),
+    ("program", "programme"),
+    ("catalog", "catalogue"),
+    ("dialog", "dialogue"),
+    ("traveler", "traveller"),
+    ("jewelry", "jewellery"),
+    ("gray", "grey"),
+)
+
+
+def apply_equivalent_variants(words: Set[str]) -> None:
+    for first, second in VARIANT_EQUIVALENTS:
+        if first in words or second in words:
+            words.add(first)
+            words.add(second)
 
 
 IRREGULAR_FORMS = {
@@ -175,15 +210,24 @@ def load_word_list(word_file: Path) -> Set[str]:
 def build_word_sets() -> Dict[str, Set[str]]:
     sets: Dict[str, Set[str]] = {}
     if CET4_FILE.exists():
-        sets["cet4"] = load_word_list(CET4_FILE)
+        cet4_words = load_word_list(CET4_FILE)
+        apply_equivalent_variants(cet4_words)
+        sets["cet4"] = cet4_words
     if CET6_FILE.exists():
-        sets["cet6"] = load_word_list(CET6_FILE)
+        cet6_words = load_word_list(CET6_FILE)
+        apply_equivalent_variants(cet6_words)
+        sets["cet6"] = cet6_words
     return sets
 
 
 WORD_SETS = build_word_sets()
 WORD_LISTS = {level: sorted(words) for level, words in WORD_SETS.items()}
+WORD_RANKS = {
+    level: {word: index for index, word in enumerate(word_list)}
+    for level, word_list in WORD_LISTS.items()
+}
 DEFAULT_LEVEL = "cet4"
+WORDNET_READY = False
 
 
 def available_levels() -> List[Tuple[str, str]]:
@@ -209,6 +253,31 @@ def get_word_set(level: str) -> Optional[Set[str]]:
 
 def get_word_list(level: str) -> List[str]:
     return WORD_LISTS.get(level, [])
+
+
+def get_word_rank(level: str) -> Dict[str, int]:
+    return WORD_RANKS.get(level, {})
+
+
+def ensure_wordnet() -> bool:
+    global WORDNET_READY
+    if WORDNET_READY:
+        return True
+    try:
+        if str(NLTK_DATA_DIR) not in nltk.data.path:
+            nltk.data.path.append(str(NLTK_DATA_DIR))
+        try:
+            nltk.data.find("corpora/wordnet")
+        except LookupError:
+            nltk.download("wordnet", download_dir=str(NLTK_DATA_DIR))
+        try:
+            nltk.data.find("corpora/omw-1.4")
+        except LookupError:
+            nltk.download("omw-1.4", download_dir=str(NLTK_DATA_DIR))
+        WORDNET_READY = True
+        return True
+    except Exception:
+        return False
 
 
 def decode_uploaded_text(raw: bytes) -> str:
@@ -389,10 +458,28 @@ def is_missing_segment(segment: str, missing_set: Set[str]) -> bool:
     return normalize_segment_token(segment) in missing_set
 
 
-def suggest_replacements(word: str, word_list: List[str]) -> List[str]:
-    if not word_list:
+def suggest_replacements(
+    word: str, word_set: Set[str], word_rank: Dict[str, int]
+) -> List[str]:
+    if not word_set or not ensure_wordnet():
         return []
-    return difflib.get_close_matches(word, word_list, n=5, cutoff=0.78)
+    normalized = normalize_token(word)
+    suggestions: Set[str] = set()
+    candidates = generate_candidates(normalized)
+    for base in candidates:
+        for synset in wn.synsets(base):
+            for lemma in synset.lemma_names():
+                lemma_normalized = lemma.replace("_", " ").lower()
+                if " " in lemma_normalized or "-" in lemma_normalized:
+                    continue
+                if not re.fullmatch(r"[a-z]+", lemma_normalized):
+                    continue
+                if lemma_normalized == normalized:
+                    continue
+                if lemma_normalized in word_set:
+                    suggestions.add(lemma_normalized)
+    ranked = sorted(suggestions, key=lambda item: word_rank.get(item, 1_000_000))
+    return ranked[:5]
 
 
 def iter_segments(text: str) -> List[Tuple[str, bool]]:
@@ -476,12 +563,12 @@ def build_pdf_bytes(text: str, missing_set: Set[str]) -> BytesIO:
 
 
 def build_api_results(
-    text: str, word_set: Set[str], include_suggestions: bool, word_list: List[str]
+    text: str, word_set: Set[str], include_suggestions: bool, word_rank: Dict[str, int]
 ) -> Dict[str, object]:
     results = build_results(text, word_set)
     if include_suggestions:
         for item in results["missing_items"]:
-            item["suggestions"] = suggest_replacements(item["word"], word_list)
+            item["suggestions"] = suggest_replacements(item["word"], word_set, word_rank)
         results["suggestions_enabled"] = True
     else:
         results["suggestions_enabled"] = False
@@ -513,6 +600,8 @@ def index() -> str:
     results: Optional[Dict[str, object]] = None
     selected_level = resolve_level(request.form.get("level") if request.method == "POST" else None)
     word_set = get_word_set(selected_level)
+    include_suggestions = request.form.get("suggestions") in {"on", "true"}
+    word_rank = get_word_rank(selected_level)
 
     if request.method == "POST":
         file_storage = request.files.get("text_file")
@@ -534,7 +623,9 @@ def index() -> str:
             elif not word_set:
                 error = "Word list not found for the selected level."
             else:
-                results = build_results(input_text, word_set)
+                results = build_api_results(
+                    input_text, word_set, include_suggestions, word_rank
+                )
 
     return render_template(
         "index.html",
@@ -555,7 +646,7 @@ def check() -> tuple[str, int]:
     level = resolve_level(data.get("level"))
     include_suggestions = bool(data.get("suggestions"))
     word_set = get_word_set(level)
-    word_list = get_word_list(level)
+    word_rank = get_word_rank(level)
     if not word_set:
         return jsonify({"error": "Word list not found for selected level."}), 500
 
@@ -575,7 +666,7 @@ def check() -> tuple[str, int]:
             200,
         )
 
-    results = build_api_results(text, word_set, include_suggestions, word_list)
+    results = build_api_results(text, word_set, include_suggestions, word_rank)
     results["level"] = level
     return jsonify(results), 200
 
@@ -588,7 +679,7 @@ def extract() -> tuple[str, int]:
     level = resolve_level(request.form.get("level"))
     include_suggestions = request.form.get("suggestions") in {"true", "on"}
     word_set = get_word_set(level)
-    word_list = get_word_list(level)
+    word_rank = get_word_rank(level)
     if not word_set:
         return jsonify({"error": "Word list not found for selected level."}), 500
 
@@ -601,7 +692,7 @@ def extract() -> tuple[str, int]:
     except Exception:
         return jsonify({"error": "Failed to parse the file."}), 400
 
-    results = build_api_results(text, word_set, include_suggestions, word_list)
+    results = build_api_results(text, word_set, include_suggestions, word_rank)
     results["text"] = text
     results["level"] = level
     return jsonify(results), 200

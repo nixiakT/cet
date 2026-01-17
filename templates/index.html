@@ -307,8 +307,8 @@
           {% endfor %}
         </select>
         <div class="toggle-row">
-          <input id="suggestions" name="suggestions" type="checkbox">
-          <label for="suggestions" style="margin: 0;">Show replacement suggestions (spelling-based)</label>
+          <input id="suggestions" name="suggestions" type="checkbox" {% if results and results.suggestions_enabled %}checked{% endif %}>
+          <label for="suggestions" style="margin: 0;">Show synonym suggestions (semantic)</label>
         </div>
 
         <label for="text_input">Paste text (optional)</label>
@@ -390,7 +390,6 @@
         const statUnique = document.getElementById('stat_unique');
         const statLevel = document.getElementById('stat_level');
         const statLevelUnique = document.getElementById('stat_level_unique');
-        const suggestionColumns = document.querySelectorAll('.suggestions-col');
         const allGood = document.getElementById('all_good');
         const resultsDetail = document.getElementById('results_detail');
         const missingTable = document.getElementById('missing_table_body');
@@ -461,7 +460,7 @@
         }
 
         function toggleSuggestions(show) {
-          suggestionColumns.forEach((col) => {
+          document.querySelectorAll('.suggestions-col').forEach((col) => {
             col.style.display = show ? '' : 'none';
           });
         }
@@ -504,6 +503,7 @@
 
           uniqueList.value = data.unique_list || '';
           highlightLayer.innerHTML = data.highlighted || '';
+          toggleSuggestions(!!data.suggestions_enabled);
           setDownloadState(!!textInput.value.trim());
           syncScroll();
         }
@@ -675,6 +675,12 @@
           });
         }
 
+        const initialSuggestions = {{ 'true' if results and results.suggestions_enabled else 'false' }};
+        toggleSuggestions(initialSuggestions);
+        if (suggestionsToggle) {
+          suggestionsToggle.checked = initialSuggestions;
+        }
+
         if (textInput.value.trim()) {
           renderPlain(textInput.value);
           runCheck();
@@ -682,7 +688,6 @@
           renderPlain('');
           updateLevelLabels();
         }
-        toggleSuggestions(false);
       </script>
     </main>
   </body>

@@ -1,6 +1,6 @@
 # CET4 Word Checker
 
-Upload a `.txt`, `.docx`, or `.pdf` file (or paste text) and choose CET4 or CET6 to list out-of-level words. The UI can export highlighted HTML, PDF, and DOCX, and optionally show spelling-based replacement suggestions.
+Upload a `.txt`, `.docx`, or `.pdf` file (or paste text) and choose CET4 or CET6 to list out-of-level words. The UI can export highlighted HTML, PDF, and DOCX, and optionally show semantic synonym suggestions (WordNet).
 
 ## Run locally
 
