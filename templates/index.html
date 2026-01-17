@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>CET4 Word Checker</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #f6f7fb;
+        --panel: #ffffff;
+        --text: #1b1f24;
+        --muted: #5b6470;
+        --accent: #2455a4;
+        --border: #e1e5ea;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: "Georgia", "Times New Roman", serif;
+        background: var(--bg);
+        color: var(--text);
+      }
+      main {
+        max-width: 920px;
+        margin: 40px auto;
+        padding: 0 20px 48px;
+      }
+      h1 {
+        font-size: 32px;
+        margin: 0 0 8px;
+      }
+      p {
+        margin: 0 0 24px;
+        color: var(--muted);
+      }
+      form {
+        background: var(--panel);
+        border-radius: 12px;
+        padding: 24px;
+        border: 1px solid var(--border);
+        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.06);
+      }
+      label {
+        display: block;
+        font-weight: 700;
+        margin: 18px 0 8px;
+      }
+      textarea {
+        width: 100%;
+        min-height: 180px;
+        resize: vertical;
+        padding: 12px;
+        border-radius: 8px;
+        border: 1px solid var(--border);
+        font-family: "Courier New", monospace;
+        font-size: 14px;
+      }
+      input[type="file"] {
+        display: block;
+        margin-bottom: 8px;
+      }
+      button {
+        margin-top: 18px;
+        padding: 12px 18px;
+        border: none;
+        border-radius: 999px;
+        background: var(--accent);
+        color: #fff;
+        font-size: 16px;
+        cursor: pointer;
+      }
+      .note {
+        font-size: 13px;
+        color: var(--muted);
+      }
+      .error {
+        margin-top: 16px;
+        padding: 12px 16px;
+        border-radius: 8px;
+        background: #ffe8e6;
+        color: #8a1f1f;
+        border: 1px solid #f2b7b3;
+      }
+      .results {
+        margin-top: 24px;
+        background: var(--panel);
+        border-radius: 12px;
+        padding: 24px;
+        border: 1px solid var(--border);
+      }
+      .stats {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+        gap: 12px;
+        margin-bottom: 18px;
+      }
+      .stat {
+        background: #f2f4f8;
+        border-radius: 10px;
+        padding: 12px 16px;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        margin-top: 12px;
+      }
+      th, td {
+        text-align: left;
+        padding: 10px 8px;
+        border-bottom: 1px solid var(--border);
+      }
+      th {
+        font-size: 13px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: var(--muted);
+      }
+      .unique-list {
+        width: 100%;
+        min-height: 140px;
+        margin-top: 16px;
+        padding: 12px;
+        border-radius: 8px;
+        border: 1px solid var(--border);
+        font-family: "Courier New", monospace;
+        font-size: 13px;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>CET4 Word Checker</h1>
+      <p>Upload a text file or paste text to list the words that are not in the CET4 vocabulary.</p>
+
+      <form method="post" enctype="multipart/form-data">
+        <label for="text_file">Upload a .txt file (optional)</label>
+        <input id="text_file" name="text_file" type="file" accept=".txt">
+        <span class="note">If a file is uploaded, the pasted text below is ignored.</span>
+
+        <label for="text_input">Paste text (optional)</label>
+        <textarea id="text_input" name="text_input" placeholder="Paste English text here.">{{ input_text }}</textarea>
+
+        <button type="submit">Check Words</button>
+      </form>
+
+      {% if error %}
+        <div class="error">{{ error }}</div>
+      {% endif %}
+
+      {% if results %}
+        <section class="results">
+          <div class="stats">
+            <div class="stat">Total tokens: {{ results.total_count }}</div>
+            <div class="stat">Not in CET4: {{ results.missing_count }}</div>
+            <div class="stat">Unique not in CET4: {{ results.unique_missing }}</div>
+          </div>
+
+          {% if results.unique_missing == 0 %}
+            <p>All words are in the CET4 list.</p>
+          {% else %}
+            <table>
+              <thead>
+                <tr>
+                  <th>Word</th>
+                  <th>Count</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for word, count in results.missing_items %}
+                  <tr>
+                    <td>{{ word }}</td>
+                    <td>{{ count }}</td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+
+            <label for="unique_list">Unique words not in CET4</label>
+            <textarea id="unique_list" class="unique-list" readonly>{{ results.unique_list }}</textarea>
+          {% endif %}
+        </section>
+      {% endif %}
+    </main>
+  </body>
+</html>
