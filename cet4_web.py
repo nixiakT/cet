@@ -1,9 +1,10 @@
 import re
 from collections import Counter
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set
 
 from flask import Flask, render_template, request
+from markupsafe import Markup, escape
 
 WORD_FILE = Path(__file__).resolve().parent / "wordscheck" / "CET4_words_from_CET46_2016.csv"
 TOKEN_RE = re.compile(r"[A-Za-z]+(?:[-'][A-Za-z]+)*")
@@ -31,6 +32,29 @@ def extract_tokens(text: str) -> List[str]:
 
 def normalize_token(token: str) -> str:
     return token.lower()
+
+
+IRREGULAR_FORMS = {
+    "am": "be",
+    "is": "be",
+    "are": "be",
+    "was": "be",
+    "were": "be",
+    "been": "be",
+    "being": "be",
+    "does": "do",
+    "did": "do",
+    "done": "do",
+    "has": "have",
+    "had": "have",
+}
+
+CONTRACTION_EXCEPTIONS = {
+    "won't": ["will"],
+    "can't": ["can"],
+    "shan't": ["shall"],
+    "ain't": ["am", "is", "are", "has", "have"],
+}
 
 
 def expand_parentheses(word: str) -> List[str]:
@@ -111,10 +135,115 @@ def decode_uploaded_text(raw: bytes) -> str:
     return raw.decode("utf-8", errors="ignore")
 
 
+def contraction_bases(token: str) -> List[str]:
+    if token in CONTRACTION_EXCEPTIONS:
+        return CONTRACTION_EXCEPTIONS[token][:]
+    bases = []
+    if token.endswith("n't") and len(token) > 3:
+        bases.append(token[:-3])
+    for suffix in ("'re", "'ve", "'ll", "'d", "'m"):
+        if token.endswith(suffix):
+            bases.append(token[: -len(suffix)])
+    if token.endswith("'s"):
+        bases.append(token[:-2])
+    if token.endswith("'"):
+        bases.append(token[:-1])
+    return [base for base in bases if base]
+
+
+def stem_plural(token: str) -> Set[str]:
+    candidates: Set[str] = set()
+    if len(token) <= 3:
+        return candidates
+    if token.endswith("ies") and len(token) > 4:
+        candidates.add(token[:-3] + "y")
+    if token.endswith("ves") and len(token) > 4:
+        candidates.add(token[:-3] + "f")
+        candidates.add(token[:-3] + "fe")
+    if token.endswith("es") and len(token) > 3:
+        candidates.add(token[:-2])
+    if token.endswith("s") and len(token) > 3:
+        candidates.add(token[:-1])
+    return candidates
+
+
+def stem_ing(token: str) -> Set[str]:
+    candidates: Set[str] = set()
+    if token.endswith("ing") and len(token) > 5:
+        base = token[:-3]
+        candidates.add(base)
+        if len(base) > 1 and base[-1] == base[-2]:
+            candidates.add(base[:-1])
+        if not base.endswith("e"):
+            candidates.add(base + "e")
+    return candidates
+
+
+def stem_ed(token: str) -> Set[str]:
+    candidates: Set[str] = set()
+    if token.endswith("ed") and len(token) > 4:
+        base = token[:-2]
+        candidates.add(base)
+        if len(base) > 1 and base[-1] == base[-2]:
+            candidates.add(base[:-1])
+        if base.endswith("i"):
+            candidates.add(base[:-1] + "y")
+        if not base.endswith("e"):
+            candidates.add(base + "e")
+    return candidates
+
+
+def generate_candidates(token: str) -> Set[str]:
+    candidates: Set[str] = {token}
+    if "-" in token:
+        candidates.add(token.replace("-", ""))
+    if token in IRREGULAR_FORMS:
+        candidates.add(IRREGULAR_FORMS[token])
+    candidates.update(contraction_bases(token))
+
+    for base in list(candidates):
+        if base in IRREGULAR_FORMS:
+            candidates.add(IRREGULAR_FORMS[base])
+        candidates.update(stem_plural(base))
+        candidates.update(stem_ing(base))
+        candidates.update(stem_ed(base))
+
+    return {candidate for candidate in candidates if candidate}
+
+
+def is_known_word(token: str) -> bool:
+    normalized = normalize_token(token)
+    for candidate in generate_candidates(normalized):
+        if candidate in CET4_WORDS:
+            return True
+    return False
+
+
+def highlight_missing(text: str) -> Markup:
+    normalized = normalize_text(text)
+    output: List[str] = []
+    last_index = 0
+
+    for match in TOKEN_RE.finditer(normalized):
+        start, end = match.span()
+        original_chunk = text[start:end]
+        output.append(str(escape(text[last_index:start])))
+        if is_known_word(normalized[start:end]):
+            output.append(str(escape(original_chunk)))
+        else:
+            output.append(f'<span class="missing">{escape(original_chunk)}</span>')
+        last_index = end
+
+    output.append(str(escape(text[last_index:])))
+    return Markup("".join(output))
+
+
 def build_results(text: str) -> Dict[str, object]:
     tokens = extract_tokens(text)
-    normalized = [normalize_token(token) for token in tokens]
-    missing = [token for token in normalized if token not in CET4_WORDS]
+    missing = []
+    for token in tokens:
+        if not is_known_word(token):
+            missing.append(normalize_token(token))
     counter = Counter(missing)
     missing_items = sorted(counter.items(), key=lambda item: (-item[1], item[0]))
     return {
@@ -123,6 +252,7 @@ def build_results(text: str) -> Dict[str, object]:
         "unique_missing": len(counter),
         "missing_items": missing_items,
         "unique_list": "\n".join(word for word, _ in missing_items),
+        "highlighted": highlight_missing(text),
     }
 
 

@@ -4,42 +4,90 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>CET4 Word Checker</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@600&family=Source+Sans+3:wght@400;600&display=swap" rel="stylesheet">
     <style>
       :root {
         color-scheme: light;
-        --bg: #f6f7fb;
+        --bg: #f4f0ea;
         --panel: #ffffff;
-        --text: #1b1f24;
-        --muted: #5b6470;
-        --accent: #2455a4;
-        --border: #e1e5ea;
+        --text: #1c1b18;
+        --muted: #5e5a52;
+        --accent: #0b6d6b;
+        --accent-strong: #074949;
+        --accent-warm: #c5742f;
+        --border: #e7e1d7;
+        --shadow: 0 20px 60px rgba(16, 24, 32, 0.12);
+        --highlight: #ffd27d;
       }
       * { box-sizing: border-box; }
       body {
         margin: 0;
-        font-family: "Georgia", "Times New Roman", serif;
-        background: var(--bg);
+        font-family: "Source Sans 3", "Trebuchet MS", "Calibri", sans-serif;
+        background: radial-gradient(circle at top left, #fff7e8 0%, transparent 45%),
+          radial-gradient(circle at 20% 90%, #e7f2f1 0%, transparent 50%),
+          var(--bg);
         color: var(--text);
+        min-height: 100vh;
+        position: relative;
+      }
+      body::before {
+        content: "";
+        position: fixed;
+        inset: 0;
+        background: linear-gradient(120deg, rgba(11, 109, 107, 0.08), transparent 45%),
+          linear-gradient(-20deg, rgba(197, 116, 47, 0.12), transparent 55%);
+        pointer-events: none;
+        z-index: 0;
       }
       main {
-        max-width: 920px;
-        margin: 40px auto;
-        padding: 0 20px 48px;
+        max-width: 1040px;
+        margin: 32px auto 60px;
+        padding: 0 24px 48px;
+        position: relative;
+        z-index: 1;
+      }
+      h1, h2 {
+        font-family: "Playfair Display", "Georgia", serif;
+        margin: 0 0 8px;
       }
       h1 {
-        font-size: 32px;
-        margin: 0 0 8px;
+        font-size: 36px;
       }
       p {
         margin: 0 0 24px;
         color: var(--muted);
       }
-      form {
+      .hero {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(220px, 320px);
+        gap: 24px;
+        align-items: center;
+        margin-bottom: 24px;
+      }
+      .eyebrow {
+        text-transform: uppercase;
+        letter-spacing: 0.2em;
+        font-size: 12px;
+        font-weight: 600;
+        color: var(--accent-strong);
+      }
+      .hero-card {
+        background: linear-gradient(140deg, rgba(11, 109, 107, 0.1), rgba(197, 116, 47, 0.12));
+        border-radius: 18px;
+        padding: 18px;
+        border: 1px solid rgba(11, 109, 107, 0.2);
+        font-size: 14px;
+        color: var(--muted);
+      }
+      .panel {
         background: var(--panel);
-        border-radius: 12px;
+        border-radius: 16px;
         padding: 24px;
         border: 1px solid var(--border);
-        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.06);
+        box-shadow: var(--shadow);
+        animation: rise 0.6s ease both;
       }
       label {
         display: block;
@@ -51,8 +99,9 @@
         min-height: 180px;
         resize: vertical;
         padding: 12px;
-        border-radius: 8px;
-        border: 1px solid var(--border);
+        border-radius: 10px;
+        border: 1px solid #d7d1c7;
+        background: #fbfaf8;
         font-family: "Courier New", monospace;
         font-size: 14px;
       }
@@ -65,10 +114,11 @@
         padding: 12px 18px;
         border: none;
         border-radius: 999px;
-        background: var(--accent);
+        background: linear-gradient(120deg, var(--accent), var(--accent-warm));
         color: #fff;
         font-size: 16px;
         cursor: pointer;
+        box-shadow: 0 10px 20px rgba(11, 109, 107, 0.2);
       }
       .note {
         font-size: 13px;
@@ -77,17 +127,13 @@
       .error {
         margin-top: 16px;
         padding: 12px 16px;
-        border-radius: 8px;
+        border-radius: 10px;
         background: #ffe8e6;
         color: #8a1f1f;
         border: 1px solid #f2b7b3;
       }
       .results {
         margin-top: 24px;
-        background: var(--panel);
-        border-radius: 12px;
-        padding: 24px;
-        border: 1px solid var(--border);
       }
       .stats {
         display: grid;
@@ -96,10 +142,14 @@
         margin-bottom: 18px;
       }
       .stat {
-        background: #f2f4f8;
-        border-radius: 10px;
+        background: #f6f2ea;
+        border-radius: 12px;
         padding: 12px 16px;
+        border: 1px solid #eadfce;
+        animation: fadeIn 0.6s ease both;
       }
+      .stat:nth-child(2) { animation-delay: 0.05s; }
+      .stat:nth-child(3) { animation-delay: 0.1s; }
       table {
         width: 100%;
         border-collapse: collapse;
@@ -121,19 +171,65 @@
         min-height: 140px;
         margin-top: 16px;
         padding: 12px;
-        border-radius: 8px;
-        border: 1px solid var(--border);
+        border-radius: 10px;
+        border: 1px solid #d7d1c7;
+        background: #fbfaf8;
         font-family: "Courier New", monospace;
         font-size: 13px;
+      }
+      .highlight-block {
+        margin-top: 24px;
+      }
+      .highlighted-text {
+        padding: 16px;
+        border-radius: 12px;
+        border: 1px solid #eadfce;
+        background: #fff8e9;
+        line-height: 1.8;
+        max-height: 320px;
+        overflow-y: auto;
+      }
+      .missing {
+        background: linear-gradient(transparent 45%, var(--highlight) 45%);
+        padding: 0 2px;
+        border-radius: 4px;
+        color: #3b2d19;
+      }
+      @media (max-width: 860px) {
+        .hero {
+          grid-template-columns: 1fr;
+        }
+      }
+      @keyframes rise {
+        from {
+          opacity: 0;
+          transform: translateY(12px);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
+      }
+      @keyframes fadeIn {
+        from { opacity: 0; }
+        to { opacity: 1; }
       }
     </style>
   </head>
   <body>
     <main>
-      <h1>CET4 Word Checker</h1>
-      <p>Upload a text file or paste text to list the words that are not in the CET4 vocabulary.</p>
+      <header class="hero">
+        <div>
+          <div class="eyebrow">CET4 Word Checker</div>
+          <h1>Spot the words beyond CET4.</h1>
+          <p>Upload a text file or paste text to find words outside the CET4 list, then refine with the highlighted view.</p>
+        </div>
+        <div class="hero-card">
+          Upload any English text to get a clean list of non-CET4 words, plus an inline highlight for fast editing.
+        </div>
+      </header>
 
-      <form method="post" enctype="multipart/form-data">
+      <form class="panel" method="post" enctype="multipart/form-data">
         <label for="text_file">Upload a .txt file (optional)</label>
         <input id="text_file" name="text_file" type="file" accept=".txt">
         <span class="note">If a file is uploaded, the pasted text below is ignored.</span>
@@ -149,7 +245,7 @@
       {% endif %}
 
       {% if results %}
-        <section class="results">
+        <section class="results panel">
           <div class="stats">
             <div class="stat">Total tokens: {{ results.total_count }}</div>
             <div class="stat">Not in CET4: {{ results.missing_count }}</div>
@@ -178,6 +274,11 @@
 
             <label for="unique_list">Unique words not in CET4</label>
             <textarea id="unique_list" class="unique-list" readonly>{{ results.unique_list }}</textarea>
+
+            <div class="highlight-block">
+              <h2>Highlighted text</h2>
+              <div class="highlighted-text">{{ results.highlighted|safe }}</div>
+            </div>
           {% endif %}
         </section>
       {% endif %}
