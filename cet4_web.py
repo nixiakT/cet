@@ -1,3 +1,4 @@
+import difflib
 import html
 import re
 from collections import Counter
@@ -74,6 +75,28 @@ IRREGULAR_FORMS = {
     "least": ("little",),
     "more": ("many", "much"),
     "most": ("many", "much"),
+    "spoke": ("speak",),
+    "spoken": ("speak",),
+    "wrote": ("write",),
+    "written": ("write",),
+    "ate": ("eat",),
+    "eaten": ("eat",),
+    "took": ("take",),
+    "taken": ("take",),
+    "gave": ("give",),
+    "given": ("give",),
+    "saw": ("see",),
+    "seen": ("see",),
+    "sang": ("sing",),
+    "sung": ("sing",),
+    "went": ("go",),
+    "gone": ("go",),
+    "knew": ("know",),
+    "known": ("know",),
+    "flew": ("fly",),
+    "flown": ("fly",),
+    "drove": ("drive",),
+    "driven": ("drive",),
 }
 
 CONTRACTION_EXCEPTIONS = {
@@ -159,6 +182,7 @@ def build_word_sets() -> Dict[str, Set[str]]:
 
 
 WORD_SETS = build_word_sets()
+WORD_LISTS = {level: sorted(words) for level, words in WORD_SETS.items()}
 DEFAULT_LEVEL = "cet4"
 
 
@@ -181,6 +205,10 @@ def resolve_level(level: Optional[str]) -> str:
 
 def get_word_set(level: str) -> Optional[Set[str]]:
     return WORD_SETS.get(level)
+
+
+def get_word_list(level: str) -> List[str]:
+    return WORD_LISTS.get(level, [])
 
 
 def decode_uploaded_text(raw: bytes) -> str:
@@ -361,6 +389,12 @@ def is_missing_segment(segment: str, missing_set: Set[str]) -> bool:
     return normalize_segment_token(segment) in missing_set
 
 
+def suggest_replacements(word: str, word_list: List[str]) -> List[str]:
+    if not word_list:
+        return []
+    return difflib.get_close_matches(word, word_list, n=5, cutoff=0.78)
+
+
 def iter_segments(text: str) -> List[Tuple[str, bool]]:
     normalized = normalize_text(text)
     segments: List[Tuple[str, bool]] = []
@@ -441,11 +475,16 @@ def build_pdf_bytes(text: str, missing_set: Set[str]) -> BytesIO:
     return output
 
 
-def build_api_results(text: str, word_set: Set[str]) -> Dict[str, object]:
+def build_api_results(
+    text: str, word_set: Set[str], include_suggestions: bool, word_list: List[str]
+) -> Dict[str, object]:
     results = build_results(text, word_set)
-    results["missing_items"] = [
-        {"word": word, "count": count} for word, count in results["missing_items"]
-    ]
+    if include_suggestions:
+        for item in results["missing_items"]:
+            item["suggestions"] = suggest_replacements(item["word"], word_list)
+        results["suggestions_enabled"] = True
+    else:
+        results["suggestions_enabled"] = False
     return results
 
 
@@ -455,13 +494,15 @@ def build_results(text: str, word_set: Set[str]) -> Dict[str, object]:
     missing_set = set(missing)
     counter = Counter(missing)
     missing_items = sorted(counter.items(), key=lambda item: (-item[1], item[0]))
+    missing_rows = [{"word": word, "count": count} for word, count in missing_items]
     return {
         "total_count": len(tokens),
         "missing_count": sum(counter.values()),
         "unique_missing": len(counter),
-        "missing_items": missing_items,
+        "missing_items": missing_rows,
         "unique_list": "\n".join(word for word, _ in missing_items),
         "highlighted": str(highlight_missing(text, missing_set)),
+        "suggestions_enabled": False,
     }
 
 
@@ -512,7 +553,9 @@ def check() -> tuple[str, int]:
     if not isinstance(text, str):
         text = ""
     level = resolve_level(data.get("level"))
+    include_suggestions = bool(data.get("suggestions"))
     word_set = get_word_set(level)
+    word_list = get_word_list(level)
     if not word_set:
         return jsonify({"error": "Word list not found for selected level."}), 500
 
@@ -526,12 +569,13 @@ def check() -> tuple[str, int]:
                     "missing_items": [],
                     "unique_list": "",
                     "highlighted": str(escape(text)),
+                    "suggestions_enabled": False,
                 }
             ),
             200,
         )
 
-    results = build_api_results(text, word_set)
+    results = build_api_results(text, word_set, include_suggestions, word_list)
     results["level"] = level
     return jsonify(results), 200
 
@@ -542,7 +586,9 @@ def extract() -> tuple[str, int]:
     if not file_storage or not file_storage.filename:
         return jsonify({"error": "No file uploaded."}), 400
     level = resolve_level(request.form.get("level"))
+    include_suggestions = request.form.get("suggestions") in {"true", "on"}
     word_set = get_word_set(level)
+    word_list = get_word_list(level)
     if not word_set:
         return jsonify({"error": "Word list not found for selected level."}), 500
 
@@ -555,7 +601,7 @@ def extract() -> tuple[str, int]:
     except Exception:
         return jsonify({"error": "Failed to parse the file."}), 400
 
-    results = build_api_results(text, word_set)
+    results = build_api_results(text, word_set, include_suggestions, word_list)
     results["text"] = text
     results["level"] = level
     return jsonify(results), 200

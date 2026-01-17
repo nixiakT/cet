@@ -114,6 +114,16 @@
         font-family: "Source Sans 3", "Trebuchet MS", "Calibri", sans-serif;
         font-size: 14px;
       }
+      .toggle-row {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-top: 12px;
+      }
+      .toggle-row input[type="checkbox"] {
+        width: 16px;
+        height: 16px;
+      }
       .input-shell {
         position: relative;
         min-height: 220px;
@@ -296,6 +306,10 @@
             <option value="{{ value }}" {% if value == selected_level %}selected{% endif %}>{{ label }}</option>
           {% endfor %}
         </select>
+        <div class="toggle-row">
+          <input id="suggestions" name="suggestions" type="checkbox">
+          <label for="suggestions" style="margin: 0;">Show replacement suggestions (spelling-based)</label>
+        </div>
 
         <label for="text_input">Paste text (optional)</label>
         <div class="input-shell">
@@ -333,14 +347,20 @@
                 <tr>
                   <th>Word</th>
                   <th>Count</th>
+                  <th class="suggestions-col">Suggestions</th>
                 </tr>
               </thead>
               <tbody id="missing_table_body">
                 {% if results %}
-                  {% for word, count in results.missing_items %}
+                  {% for item in results.missing_items %}
                     <tr>
-                      <td>{{ word }}</td>
-                      <td>{{ count }}</td>
+                      <td>{{ item.word }}</td>
+                      <td>{{ item.count }}</td>
+                      <td class="suggestions-col">
+                        {% if item.suggestions %}
+                          {{ item.suggestions | join(", ") }}
+                        {% endif %}
+                      </td>
                     </tr>
                   {% endfor %}
                 {% endif %}
@@ -363,12 +383,14 @@
         const highlightLayer = document.getElementById('highlight_layer');
         const fileInput = document.getElementById('text_file');
         const levelSelect = document.getElementById('level');
+        const suggestionsToggle = document.getElementById('suggestions');
         const resultsSection = document.getElementById('results');
         const statTotal = document.getElementById('stat_total');
         const statMissing = document.getElementById('stat_missing');
         const statUnique = document.getElementById('stat_unique');
         const statLevel = document.getElementById('stat_level');
         const statLevelUnique = document.getElementById('stat_level_unique');
+        const suggestionColumns = document.querySelectorAll('.suggestions-col');
         const allGood = document.getElementById('all_good');
         const resultsDetail = document.getElementById('results_detail');
         const missingTable = document.getElementById('missing_table_body');
@@ -424,6 +446,7 @@
           resultsDetail.style.display = 'none';
           resultsSection.style.display = 'none';
           setDownloadState(false);
+          toggleSuggestions(false);
         }
 
         function updateLevelLabels() {
@@ -437,12 +460,19 @@
           }
         }
 
+        function toggleSuggestions(show) {
+          suggestionColumns.forEach((col) => {
+            col.style.display = show ? '' : 'none';
+          });
+        }
+
         function updateResults(data) {
           clearClientError();
           statTotal.textContent = data.total_count;
           statMissing.textContent = data.missing_count;
           statUnique.textContent = data.unique_missing;
           updateLevelLabels();
+          toggleSuggestions(!!data.suggestions_enabled);
 
           resultsSection.style.display = 'block';
 
@@ -460,10 +490,14 @@
               const row = document.createElement('tr');
               const wordCell = document.createElement('td');
               const countCell = document.createElement('td');
+              const suggestionsCell = document.createElement('td');
               wordCell.textContent = item.word;
               countCell.textContent = item.count;
+              suggestionsCell.textContent = Array.isArray(item.suggestions) ? item.suggestions.join(', ') : '';
+              suggestionsCell.className = 'suggestions-col';
               row.appendChild(wordCell);
               row.appendChild(countCell);
+              row.appendChild(suggestionsCell);
               missingTable.appendChild(row);
             });
           }
@@ -485,10 +519,14 @@
 
           const requestId = ++lastRequestId;
           try {
-            const response = await fetch('/check', {
+          const response = await fetch('/check', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ text, level: levelSelect ? levelSelect.value : 'cet4' })
+              body: JSON.stringify({
+                text,
+                level: levelSelect ? levelSelect.value : 'cet4',
+                suggestions: suggestionsToggle ? suggestionsToggle.checked : false
+              })
             });
             if (!response.ok) {
               throw new Error('Request failed');
@@ -521,6 +559,14 @@
             }
             debounceTimer = setTimeout(runCheck, 150);
             updateLevelLabels();
+          });
+        }
+        if (suggestionsToggle) {
+          suggestionsToggle.addEventListener('change', () => {
+            if (debounceTimer) {
+              clearTimeout(debounceTimer);
+            }
+            debounceTimer = setTimeout(runCheck, 150);
           });
         }
 
@@ -606,6 +652,9 @@
               if (levelSelect) {
                 formData.append('level', levelSelect.value);
               }
+              if (suggestionsToggle) {
+                formData.append('suggestions', suggestionsToggle.checked ? 'true' : 'false');
+              }
               const response = await fetch('/extract', {
                 method: 'POST',
                 body: formData
@@ -633,6 +682,7 @@
           renderPlain('');
           updateLevelLabels();
         }
+        toggleSuggestions(false);
       </script>
     </main>
   </body>
