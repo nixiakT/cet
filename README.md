@@ -1,6 +1,6 @@
 # CET4 Word Checker
 
-Upload a `.txt`, `.docx`, or `.pdf` file (or paste text) to list words not found in the CET4 or CET6 vocabulary lists. The UI can export highlighted HTML, PDF, and DOCX.
+Upload a `.txt`, `.docx`, or `.pdf` file (or paste text) and choose CET4 or CET6 to list out-of-level words. The UI can export highlighted HTML, PDF, and DOCX.
 
 ## Run locally
 

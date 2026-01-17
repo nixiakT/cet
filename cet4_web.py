@@ -45,6 +45,10 @@ def normalize_token(token: str) -> str:
     return token.lower()
 
 
+def normalize_segment_token(segment: str) -> str:
+    return normalize_token(normalize_text(segment))
+
+
 IRREGULAR_FORMS = {
     "am": ("be",),
     "is": ("be",),
@@ -343,6 +347,20 @@ def is_known_word(token: str, word_set: Set[str]) -> bool:
     return False
 
 
+def compute_missing(tokens: List[str], word_set: Set[str]) -> List[str]:
+    missing: List[str] = []
+    for token in tokens:
+        if not is_known_word(token, word_set):
+            missing.append(normalize_token(token))
+    return missing
+
+
+def is_missing_segment(segment: str, missing_set: Set[str]) -> bool:
+    if not missing_set:
+        return False
+    return normalize_segment_token(segment) in missing_set
+
+
 def iter_segments(text: str) -> List[Tuple[str, bool]]:
     normalized = normalize_text(text)
     segments: List[Tuple[str, bool]] = []
@@ -358,28 +376,28 @@ def iter_segments(text: str) -> List[Tuple[str, bool]]:
     return segments
 
 
-def highlight_missing(text: str, word_set: Set[str]) -> Markup:
+def highlight_missing(text: str, missing_set: Set[str]) -> Markup:
     output: List[str] = []
     for segment, is_word in iter_segments(text):
-        if is_word and not is_known_word(segment, word_set):
+        if is_word and is_missing_segment(segment, missing_set):
             output.append(f'<span class="missing">{escape(segment)}</span>')
         else:
             output.append(str(escape(segment)))
     return Markup("".join(output))
 
 
-def build_reportlab_markup(text: str, word_set: Set[str]) -> str:
+def build_reportlab_markup(text: str, missing_set: Set[str]) -> str:
     parts: List[str] = []
     for segment, is_word in iter_segments(text):
         escaped = html.escape(segment)
-        if is_word and not is_known_word(segment, word_set):
+        if is_word and is_missing_segment(segment, missing_set):
             parts.append(f'<font backColor="#FFD27D">{escaped}</font>')
         else:
             parts.append(escaped)
     return "".join(parts).replace("\t", "    ")
 
 
-def build_docx_bytes(text: str, word_set: Set[str]) -> BytesIO:
+def build_docx_bytes(text: str, missing_set: Set[str]) -> BytesIO:
     document = Document()
     for line in text.split("\n"):
         paragraph = document.add_paragraph()
@@ -387,7 +405,7 @@ def build_docx_bytes(text: str, word_set: Set[str]) -> BytesIO:
             continue
         for segment, is_word in iter_segments(line):
             run = paragraph.add_run(segment)
-            if is_word and not is_known_word(segment, word_set):
+            if is_word and is_missing_segment(segment, missing_set):
                 run.font.highlight_color = WD_COLOR_INDEX.YELLOW
     output = BytesIO()
     document.save(output)
@@ -395,7 +413,7 @@ def build_docx_bytes(text: str, word_set: Set[str]) -> BytesIO:
     return output
 
 
-def build_pdf_bytes(text: str, word_set: Set[str]) -> BytesIO:
+def build_pdf_bytes(text: str, missing_set: Set[str]) -> BytesIO:
     output = BytesIO()
     document = SimpleDocTemplate(
         output,
@@ -417,7 +435,7 @@ def build_pdf_bytes(text: str, word_set: Set[str]) -> BytesIO:
         if not line.strip():
             story.append(Spacer(1, 12))
             continue
-        story.append(Paragraph(build_reportlab_markup(line, word_set), style))
+        story.append(Paragraph(build_reportlab_markup(line, missing_set), style))
     document.build(story)
     output.seek(0)
     return output
@@ -433,10 +451,8 @@ def build_api_results(text: str, word_set: Set[str]) -> Dict[str, object]:
 
 def build_results(text: str, word_set: Set[str]) -> Dict[str, object]:
     tokens = extract_tokens(text)
-    missing = []
-    for token in tokens:
-        if not is_known_word(token, word_set):
-            missing.append(normalize_token(token))
+    missing = compute_missing(tokens, word_set)
+    missing_set = set(missing)
     counter = Counter(missing)
     missing_items = sorted(counter.items(), key=lambda item: (-item[1], item[0]))
     return {
@@ -445,7 +461,7 @@ def build_results(text: str, word_set: Set[str]) -> Dict[str, object]:
         "unique_missing": len(counter),
         "missing_items": missing_items,
         "unique_list": "\n".join(word for word, _ in missing_items),
-        "highlighted": str(highlight_missing(text, word_set)),
+        "highlighted": str(highlight_missing(text, missing_set)),
     }
 
 
@@ -556,7 +572,9 @@ def export_pdf():
     if not isinstance(text, str) or not text.strip():
         return jsonify({"error": "No text provided."}), 400
 
-    output = build_pdf_bytes(text, word_set)
+    tokens = extract_tokens(text)
+    missing = compute_missing(tokens, word_set)
+    output = build_pdf_bytes(text, set(missing))
     return send_file(
         output,
         mimetype="application/pdf",
@@ -576,7 +594,9 @@ def export_docx():
     if not isinstance(text, str) or not text.strip():
         return jsonify({"error": "No text provided."}), 400
 
-    output = build_docx_bytes(text, word_set)
+    tokens = extract_tokens(text)
+    missing = compute_missing(tokens, word_set)
+    output = build_docx_bytes(text, set(missing))
     return send_file(
         output,
         mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",

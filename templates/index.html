@@ -276,12 +276,12 @@
     <main>
       <header class="hero">
         <div>
-          <div class="eyebrow">CET4 Word Checker</div>
-          <h1>Spot the words beyond CET4.</h1>
-          <p>Upload a file or paste text to find words outside the CET4 list, then refine with the highlighted view.</p>
+          <div class="eyebrow">CET4 / CET6 Word Checker</div>
+          <h1>Spot the words beyond your level.</h1>
+          <p>Select CET4 or CET6 to find words outside the list, then refine with the highlighted view.</p>
         </div>
         <div class="hero-card">
-          Upload .txt, .docx, or .pdf files to get a clean list of non-CET4 or non-CET6 words, plus inline highlights for fast editing.
+          Upload .txt, .docx, or .pdf files to get a clean list of out-of-level words, plus inline highlights for fast editing.
         </div>
       </header>
 
@@ -320,12 +320,12 @@
       <section id="results" class="results panel" {% if not results %}style="display: none;"{% endif %}>
           <div class="stats">
             <div class="stat">Total tokens: <span id="stat_total">{{ results.total_count if results else 0 }}</span></div>
-            <div class="stat">Not in CET4: <span id="stat_missing">{{ results.missing_count if results else 0 }}</span></div>
-            <div class="stat">Unique not in CET4: <span id="stat_unique">{{ results.unique_missing if results else 0 }}</span></div>
+            <div class="stat">Not in <span id="stat_level">{{ selected_level if selected_level else "cet4" }}</span>: <span id="stat_missing">{{ results.missing_count if results else 0 }}</span></div>
+            <div class="stat">Unique not in <span id="stat_level_unique">{{ selected_level if selected_level else "cet4" }}</span>: <span id="stat_unique">{{ results.unique_missing if results else 0 }}</span></div>
           </div>
 
           <p id="all_good" {% if results and results.unique_missing == 0 %}{% else %}style="display: none;"{% endif %}>
-            All words are in the CET4 list.
+            All words are in the selected list.
           </p>
           <div id="results_detail" {% if results and results.unique_missing != 0 %}{% else %}style="display: none;"{% endif %}>
             <table>
@@ -367,6 +367,8 @@
         const statTotal = document.getElementById('stat_total');
         const statMissing = document.getElementById('stat_missing');
         const statUnique = document.getElementById('stat_unique');
+        const statLevel = document.getElementById('stat_level');
+        const statLevelUnique = document.getElementById('stat_level_unique');
         const allGood = document.getElementById('all_good');
         const resultsDetail = document.getElementById('results_detail');
         const missingTable = document.getElementById('missing_table_body');
@@ -424,11 +426,23 @@
           setDownloadState(false);
         }
 
+        function updateLevelLabels() {
+          if (!levelSelect) return;
+          const label = levelSelect.options[levelSelect.selectedIndex]?.text || levelSelect.value;
+          if (statLevel) {
+            statLevel.textContent = label;
+          }
+          if (statLevelUnique) {
+            statLevelUnique.textContent = label;
+          }
+        }
+
         function updateResults(data) {
           clearClientError();
           statTotal.textContent = data.total_count;
           statMissing.textContent = data.missing_count;
           statUnique.textContent = data.unique_missing;
+          updateLevelLabels();
 
           resultsSection.style.display = 'block';
 
@@ -506,6 +520,7 @@
               clearTimeout(debounceTimer);
             }
             debounceTimer = setTimeout(runCheck, 150);
+            updateLevelLabels();
           });
         }
 
@@ -616,6 +631,7 @@
           runCheck();
         } else {
           renderPlain('');
+          updateLevelLabels();
         }
       </script>
     </main>
