@@ -3,7 +3,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Dict, List, Optional, Set
 
-from flask import Flask, render_template, request
+from flask import Flask, jsonify, render_template, request
 from markupsafe import Markup, escape
 
 WORD_FILE = Path(__file__).resolve().parent / "wordscheck" / "CET4_words_from_CET46_2016.csv"
@@ -151,6 +151,16 @@ def contraction_bases(token: str) -> List[str]:
     return [base for base in bases if base]
 
 
+def stem_ly(token: str) -> Set[str]:
+    candidates: Set[str] = set()
+    if token.endswith("ly") and len(token) > 4:
+        base = token[:-2]
+        candidates.add(base)
+        if base.endswith("i") and len(base) > 1:
+            candidates.add(base[:-1] + "y")
+    return candidates
+
+
 def stem_plural(token: str) -> Set[str]:
     candidates: Set[str] = set()
     if len(token) <= 3:
@@ -193,6 +203,34 @@ def stem_ed(token: str) -> Set[str]:
     return candidates
 
 
+def stem_er(token: str) -> Set[str]:
+    candidates: Set[str] = set()
+    if token.endswith("er") and len(token) > 4:
+        base = token[:-2]
+        candidates.add(base)
+        if base.endswith("i") and len(base) > 1:
+            candidates.add(base[:-1] + "y")
+        if len(base) > 1 and base[-1] == base[-2]:
+            candidates.add(base[:-1])
+        if not base.endswith("e"):
+            candidates.add(base + "e")
+    return candidates
+
+
+def stem_est(token: str) -> Set[str]:
+    candidates: Set[str] = set()
+    if token.endswith("est") and len(token) > 5:
+        base = token[:-3]
+        candidates.add(base)
+        if base.endswith("i") and len(base) > 1:
+            candidates.add(base[:-1] + "y")
+        if len(base) > 1 and base[-1] == base[-2]:
+            candidates.add(base[:-1])
+        if not base.endswith("e"):
+            candidates.add(base + "e")
+    return candidates
+
+
 def generate_candidates(token: str) -> Set[str]:
     candidates: Set[str] = {token}
     if "-" in token:
@@ -204,9 +242,12 @@ def generate_candidates(token: str) -> Set[str]:
     for base in list(candidates):
         if base in IRREGULAR_FORMS:
             candidates.add(IRREGULAR_FORMS[base])
+        candidates.update(stem_ly(base))
         candidates.update(stem_plural(base))
         candidates.update(stem_ing(base))
         candidates.update(stem_ed(base))
+        candidates.update(stem_er(base))
+        candidates.update(stem_est(base))
 
     return {candidate for candidate in candidates if candidate}
 
@@ -252,7 +293,7 @@ def build_results(text: str) -> Dict[str, object]:
         "unique_missing": len(counter),
         "missing_items": missing_items,
         "unique_list": "\n".join(word for word, _ in missing_items),
-        "highlighted": highlight_missing(text),
+        "highlighted": str(highlight_missing(text)),
     }
 
 
@@ -283,6 +324,38 @@ def index() -> str:
         error=error,
         results=results,
     )
+
+
+@app.route("/check", methods=["POST"])
+def check() -> tuple[str, int]:
+    if not CET4_WORDS:
+        return jsonify({"error": "CET4 word list not found."}), 500
+
+    data = request.get_json(silent=True) or {}
+    text = data.get("text", "")
+    if not isinstance(text, str):
+        text = ""
+
+    if not text.strip():
+        return (
+            jsonify(
+                {
+                    "total_count": 0,
+                    "missing_count": 0,
+                    "unique_missing": 0,
+                    "missing_items": [],
+                    "unique_list": "",
+                    "highlighted": str(escape(text)),
+                }
+            ),
+            200,
+        )
+
+    results = build_results(text)
+    results["missing_items"] = [
+        {"word": word, "count": count} for word, count in results["missing_items"]
+    ]
+    return jsonify(results), 200
 
 
 if __name__ == "__main__":

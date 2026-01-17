@@ -105,6 +105,45 @@
         font-family: "Courier New", monospace;
         font-size: 14px;
       }
+      .input-shell {
+        position: relative;
+        min-height: 220px;
+      }
+      .highlight-layer {
+        position: absolute;
+        inset: 0;
+        padding: 12px;
+        border-radius: 10px;
+        border: 1px solid #d7d1c7;
+        background: #fbfaf8;
+        font-family: "Courier New", monospace;
+        font-size: 14px;
+        line-height: 1.6;
+        white-space: pre-wrap;
+        word-break: break-word;
+        overflow: auto;
+        pointer-events: none;
+        color: var(--text);
+      }
+      .text-input {
+        position: relative;
+        z-index: 2;
+        width: 100%;
+        min-height: 220px;
+        resize: vertical;
+        padding: 12px;
+        border-radius: 10px;
+        border: 1px solid transparent;
+        background: transparent;
+        font-family: "Courier New", monospace;
+        font-size: 14px;
+        line-height: 1.6;
+        color: transparent;
+        caret-color: var(--text);
+      }
+      .text-input:focus {
+        outline: none;
+      }
       input[type="file"] {
         display: block;
         margin-bottom: 8px;
@@ -180,15 +219,6 @@
       .highlight-block {
         margin-top: 24px;
       }
-      .highlighted-text {
-        padding: 16px;
-        border-radius: 12px;
-        border: 1px solid #eadfce;
-        background: #fff8e9;
-        line-height: 1.8;
-        max-height: 320px;
-        overflow-y: auto;
-      }
       .missing {
         background: linear-gradient(transparent 45%, var(--highlight) 45%);
         padding: 0 2px;
@@ -235,7 +265,16 @@
         <span class="note">If a file is uploaded, the pasted text below is ignored.</span>
 
         <label for="text_input">Paste text (optional)</label>
-        <textarea id="text_input" name="text_input" placeholder="Paste English text here.">{{ input_text }}</textarea>
+        <div class="input-shell">
+          <div id="highlight_layer" class="highlight-layer">
+            {% if results %}
+              {{ results.highlighted|safe }}
+            {% else %}
+              {{ input_text }}
+            {% endif %}
+          </div>
+          <textarea id="text_input" class="text-input" name="text_input" placeholder="Paste English text here.">{{ input_text }}</textarea>
+        </div>
 
         <button type="submit">Check Words</button>
       </form>
@@ -244,17 +283,17 @@
         <div class="error">{{ error }}</div>
       {% endif %}
 
-      {% if results %}
-        <section class="results panel">
+      <section id="results" class="results panel" {% if not results %}style="display: none;"{% endif %}>
           <div class="stats">
-            <div class="stat">Total tokens: {{ results.total_count }}</div>
-            <div class="stat">Not in CET4: {{ results.missing_count }}</div>
-            <div class="stat">Unique not in CET4: {{ results.unique_missing }}</div>
+            <div class="stat">Total tokens: <span id="stat_total">{{ results.total_count if results else 0 }}</span></div>
+            <div class="stat">Not in CET4: <span id="stat_missing">{{ results.missing_count if results else 0 }}</span></div>
+            <div class="stat">Unique not in CET4: <span id="stat_unique">{{ results.unique_missing if results else 0 }}</span></div>
           </div>
 
-          {% if results.unique_missing == 0 %}
-            <p>All words are in the CET4 list.</p>
-          {% else %}
+          <p id="all_good" {% if results and results.unique_missing == 0 %}{% else %}style="display: none;"{% endif %}>
+            All words are in the CET4 list.
+          </p>
+          <div id="results_detail" {% if results and results.unique_missing != 0 %}{% else %}style="display: none;"{% endif %}>
             <table>
               <thead>
                 <tr>
@@ -262,26 +301,168 @@
                   <th>Count</th>
                 </tr>
               </thead>
-              <tbody>
-                {% for word, count in results.missing_items %}
-                  <tr>
-                    <td>{{ word }}</td>
-                    <td>{{ count }}</td>
-                  </tr>
-                {% endfor %}
+              <tbody id="missing_table_body">
+                {% if results %}
+                  {% for word, count in results.missing_items %}
+                    <tr>
+                      <td>{{ word }}</td>
+                      <td>{{ count }}</td>
+                    </tr>
+                  {% endfor %}
+                {% endif %}
               </tbody>
             </table>
 
             <label for="unique_list">Unique words not in CET4</label>
-            <textarea id="unique_list" class="unique-list" readonly>{{ results.unique_list }}</textarea>
-
-            <div class="highlight-block">
-              <h2>Highlighted text</h2>
-              <div class="highlighted-text">{{ results.highlighted|safe }}</div>
-            </div>
-          {% endif %}
+            <textarea id="unique_list" class="unique-list" readonly>{{ results.unique_list if results else "" }}</textarea>
+          </div>
         </section>
-      {% endif %}
+
+      <script>
+        const textInput = document.getElementById('text_input');
+        const highlightLayer = document.getElementById('highlight_layer');
+        const fileInput = document.getElementById('text_file');
+        const resultsSection = document.getElementById('results');
+        const statTotal = document.getElementById('stat_total');
+        const statMissing = document.getElementById('stat_missing');
+        const statUnique = document.getElementById('stat_unique');
+        const allGood = document.getElementById('all_good');
+        const resultsDetail = document.getElementById('results_detail');
+        const missingTable = document.getElementById('missing_table_body');
+        const uniqueList = document.getElementById('unique_list');
+
+        let debounceTimer = null;
+        let lastRequestId = 0;
+
+        function renderPlain(text) {
+          highlightLayer.textContent = text;
+        }
+
+        function syncScroll() {
+          highlightLayer.scrollTop = textInput.scrollTop;
+          highlightLayer.scrollLeft = textInput.scrollLeft;
+        }
+
+        function clearResults() {
+          statTotal.textContent = '0';
+          statMissing.textContent = '0';
+          statUnique.textContent = '0';
+          missingTable.innerHTML = '';
+          uniqueList.value = '';
+          allGood.style.display = 'none';
+          resultsDetail.style.display = 'none';
+          resultsSection.style.display = 'none';
+        }
+
+        function updateResults(data) {
+          statTotal.textContent = data.total_count;
+          statMissing.textContent = data.missing_count;
+          statUnique.textContent = data.unique_missing;
+
+          resultsSection.style.display = 'block';
+
+          if (data.unique_missing === 0) {
+            allGood.style.display = 'block';
+            resultsDetail.style.display = 'none';
+          } else {
+            allGood.style.display = 'none';
+            resultsDetail.style.display = 'block';
+          }
+
+          missingTable.innerHTML = '';
+          if (Array.isArray(data.missing_items)) {
+            data.missing_items.forEach(item => {
+              const row = document.createElement('tr');
+              const wordCell = document.createElement('td');
+              const countCell = document.createElement('td');
+              wordCell.textContent = item.word;
+              countCell.textContent = item.count;
+              row.appendChild(wordCell);
+              row.appendChild(countCell);
+              missingTable.appendChild(row);
+            });
+          }
+
+          uniqueList.value = data.unique_list || '';
+          highlightLayer.innerHTML = data.highlighted || '';
+          syncScroll();
+        }
+
+        async function runCheck() {
+          const text = textInput.value;
+          if (!text.trim()) {
+            renderPlain(text);
+            clearResults();
+            return;
+          }
+
+          const requestId = ++lastRequestId;
+          try {
+            const response = await fetch('/check', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ text })
+            });
+            if (!response.ok) {
+              throw new Error('Request failed');
+            }
+            const data = await response.json();
+            if (requestId !== lastRequestId) {
+              return;
+            }
+            updateResults(data);
+          } catch (error) {
+            renderPlain(text);
+          }
+        }
+
+        textInput.addEventListener('input', () => {
+          renderPlain(textInput.value);
+          if (debounceTimer) {
+            clearTimeout(debounceTimer);
+          }
+          debounceTimer = setTimeout(runCheck, 300);
+        });
+
+        textInput.addEventListener('scroll', syncScroll);
+
+        if (fileInput) {
+          fileInput.addEventListener('change', async (event) => {
+            const file = event.target.files[0];
+            if (!file) return;
+            try {
+              const buffer = await file.arrayBuffer();
+              let decoded = '';
+              try {
+                decoded = new TextDecoder('utf-8', { fatal: false }).decode(buffer);
+              } catch (error) {
+                decoded = '';
+              }
+              if (decoded.includes('\uFFFD')) {
+                try {
+                  decoded = new TextDecoder('gbk', { fatal: false }).decode(buffer);
+                } catch (error) {
+                  decoded = decoded.replace(/\uFFFD/g, '');
+                }
+              }
+              textInput.value = decoded;
+              renderPlain(decoded);
+              runCheck();
+            } catch (error) {
+              textInput.value = '';
+              renderPlain('');
+              clearResults();
+            }
+          });
+        }
+
+        if (textInput.value.trim()) {
+          renderPlain(textInput.value);
+          runCheck();
+        } else {
+          renderPlain('');
+        }
+      </script>
     </main>
   </body>
 </html>
