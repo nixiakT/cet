@@ -1,15 +1,22 @@
+import html
 import re
 from collections import Counter
 from io import BytesIO
 from pathlib import Path
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 
 from docx import Document
-from flask import Flask, jsonify, render_template, request
+from docx.enum.text import WD_COLOR_INDEX
+from flask import Flask, jsonify, render_template, request, send_file
 from markupsafe import Markup, escape
 from pypdf import PdfReader
+from reportlab.lib.pagesizes import LETTER
+from reportlab.lib.styles import ParagraphStyle
+from reportlab.lib.units import inch
+from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
 
-WORD_FILE = Path(__file__).resolve().parent / "wordscheck" / "CET4_words_from_CET46_2016.csv"
+CET4_FILE = Path(__file__).resolve().parent / "wordscheck" / "CET4_words_from_CET46_2016.csv"
+CET6_FILE = Path(__file__).resolve().parent / "wordscheck" / "CET4+6_expanded_words_7952.csv"
 TOKEN_RE = re.compile(r"[A-Za-z]+(?:[-'][A-Za-z]+)*")
 SUPPORTED_EXTENSIONS = {".txt", ".docx", ".pdf"}
 
@@ -39,18 +46,30 @@ def normalize_token(token: str) -> str:
 
 
 IRREGULAR_FORMS = {
-    "am": "be",
-    "is": "be",
-    "are": "be",
-    "was": "be",
-    "were": "be",
-    "been": "be",
-    "being": "be",
-    "does": "do",
-    "did": "do",
-    "done": "do",
-    "has": "have",
-    "had": "have",
+    "am": ("be",),
+    "is": ("be",),
+    "are": ("be",),
+    "was": ("be",),
+    "were": ("be",),
+    "been": ("be",),
+    "being": ("be",),
+    "does": ("do",),
+    "did": ("do",),
+    "done": ("do",),
+    "has": ("have",),
+    "had": ("have",),
+    "better": ("good", "well"),
+    "best": ("good", "well"),
+    "worse": ("bad", "ill"),
+    "worst": ("bad", "ill"),
+    "farther": ("far",),
+    "farthest": ("far",),
+    "further": ("far",),
+    "furthest": ("far",),
+    "less": ("little",),
+    "least": ("little",),
+    "more": ("many", "much"),
+    "most": ("many", "much"),
 }
 
 CONTRACTION_EXCEPTIONS = {
@@ -110,11 +129,11 @@ def normalize_word(word: str) -> Optional[str]:
     return word.lower()
 
 
-def load_cet4_words(word_file: Path) -> Set[str]:
+def load_word_list(word_file: Path) -> Set[str]:
     words: Set[str] = set()
     with word_file.open(encoding="utf-8") as file:
         for line in file:
-            entry = line.strip()
+            entry = line.strip().lstrip("\ufeff")
             if not entry or entry.lower() == "word":
                 continue
             for variant in expand_entry(entry):
@@ -126,8 +145,38 @@ def load_cet4_words(word_file: Path) -> Set[str]:
                     words.add(normalized.replace("-", ""))
     return words
 
+def build_word_sets() -> Dict[str, Set[str]]:
+    sets: Dict[str, Set[str]] = {}
+    if CET4_FILE.exists():
+        sets["cet4"] = load_word_list(CET4_FILE)
+    if CET6_FILE.exists():
+        sets["cet6"] = load_word_list(CET6_FILE)
+    return sets
 
-CET4_WORDS = load_cet4_words(WORD_FILE) if WORD_FILE.exists() else set()
+
+WORD_SETS = build_word_sets()
+DEFAULT_LEVEL = "cet4"
+
+
+def available_levels() -> List[Tuple[str, str]]:
+    options: List[Tuple[str, str]] = []
+    if "cet4" in WORD_SETS:
+        options.append(("cet4", "CET4"))
+    if "cet6" in WORD_SETS:
+        options.append(("cet6", "CET6 (CET4+6)"))
+    return options
+
+
+def resolve_level(level: Optional[str]) -> str:
+    if level in WORD_SETS:
+        return level
+    if DEFAULT_LEVEL in WORD_SETS:
+        return DEFAULT_LEVEL
+    return next(iter(WORD_SETS), "")
+
+
+def get_word_set(level: str) -> Optional[Set[str]]:
+    return WORD_SETS.get(level)
 
 
 def decode_uploaded_text(raw: bytes) -> str:
@@ -270,12 +319,12 @@ def generate_candidates(token: str) -> Set[str]:
     if "-" in token:
         candidates.add(token.replace("-", ""))
     if token in IRREGULAR_FORMS:
-        candidates.add(IRREGULAR_FORMS[token])
+        candidates.update(IRREGULAR_FORMS[token])
     candidates.update(contraction_bases(token))
 
     for base in list(candidates):
         if base in IRREGULAR_FORMS:
-            candidates.add(IRREGULAR_FORMS[base])
+            candidates.update(IRREGULAR_FORMS[base])
         candidates.update(stem_ly(base))
         candidates.update(stem_plural(base))
         candidates.update(stem_ing(base))
@@ -286,46 +335,107 @@ def generate_candidates(token: str) -> Set[str]:
     return {candidate for candidate in candidates if candidate}
 
 
-def is_known_word(token: str) -> bool:
+def is_known_word(token: str, word_set: Set[str]) -> bool:
     normalized = normalize_token(token)
     for candidate in generate_candidates(normalized):
-        if candidate in CET4_WORDS:
+        if candidate in word_set:
             return True
     return False
 
 
-def highlight_missing(text: str) -> Markup:
+def iter_segments(text: str) -> List[Tuple[str, bool]]:
     normalized = normalize_text(text)
-    output: List[str] = []
+    segments: List[Tuple[str, bool]] = []
     last_index = 0
-
     for match in TOKEN_RE.finditer(normalized):
         start, end = match.span()
-        original_chunk = text[start:end]
-        output.append(str(escape(text[last_index:start])))
-        if is_known_word(normalized[start:end]):
-            output.append(str(escape(original_chunk)))
-        else:
-            output.append(f'<span class="missing">{escape(original_chunk)}</span>')
+        if start > last_index:
+            segments.append((text[last_index:start], False))
+        segments.append((text[start:end], True))
         last_index = end
+    if last_index < len(text):
+        segments.append((text[last_index:], False))
+    return segments
 
-    output.append(str(escape(text[last_index:])))
+
+def highlight_missing(text: str, word_set: Set[str]) -> Markup:
+    output: List[str] = []
+    for segment, is_word in iter_segments(text):
+        if is_word and not is_known_word(segment, word_set):
+            output.append(f'<span class="missing">{escape(segment)}</span>')
+        else:
+            output.append(str(escape(segment)))
     return Markup("".join(output))
 
 
-def build_api_results(text: str) -> Dict[str, object]:
-    results = build_results(text)
+def build_reportlab_markup(text: str, word_set: Set[str]) -> str:
+    parts: List[str] = []
+    for segment, is_word in iter_segments(text):
+        escaped = html.escape(segment)
+        if is_word and not is_known_word(segment, word_set):
+            parts.append(f'<font backColor="#FFD27D">{escaped}</font>')
+        else:
+            parts.append(escaped)
+    return "".join(parts).replace("\t", "    ")
+
+
+def build_docx_bytes(text: str, word_set: Set[str]) -> BytesIO:
+    document = Document()
+    for line in text.split("\n"):
+        paragraph = document.add_paragraph()
+        if not line:
+            continue
+        for segment, is_word in iter_segments(line):
+            run = paragraph.add_run(segment)
+            if is_word and not is_known_word(segment, word_set):
+                run.font.highlight_color = WD_COLOR_INDEX.YELLOW
+    output = BytesIO()
+    document.save(output)
+    output.seek(0)
+    return output
+
+
+def build_pdf_bytes(text: str, word_set: Set[str]) -> BytesIO:
+    output = BytesIO()
+    document = SimpleDocTemplate(
+        output,
+        pagesize=LETTER,
+        leftMargin=0.8 * inch,
+        rightMargin=0.8 * inch,
+        topMargin=0.8 * inch,
+        bottomMargin=0.8 * inch,
+    )
+    style = ParagraphStyle(
+        name="Body",
+        fontName="Helvetica",
+        fontSize=11,
+        leading=15,
+        spaceAfter=8,
+    )
+    story = []
+    for line in text.split("\n"):
+        if not line.strip():
+            story.append(Spacer(1, 12))
+            continue
+        story.append(Paragraph(build_reportlab_markup(line, word_set), style))
+    document.build(story)
+    output.seek(0)
+    return output
+
+
+def build_api_results(text: str, word_set: Set[str]) -> Dict[str, object]:
+    results = build_results(text, word_set)
     results["missing_items"] = [
         {"word": word, "count": count} for word, count in results["missing_items"]
     ]
     return results
 
 
-def build_results(text: str) -> Dict[str, object]:
+def build_results(text: str, word_set: Set[str]) -> Dict[str, object]:
     tokens = extract_tokens(text)
     missing = []
     for token in tokens:
-        if not is_known_word(token):
+        if not is_known_word(token, word_set):
             missing.append(normalize_token(token))
     counter = Counter(missing)
     missing_items = sorted(counter.items(), key=lambda item: (-item[1], item[0]))
@@ -335,7 +445,7 @@ def build_results(text: str) -> Dict[str, object]:
         "unique_missing": len(counter),
         "missing_items": missing_items,
         "unique_list": "\n".join(word for word, _ in missing_items),
-        "highlighted": str(highlight_missing(text)),
+        "highlighted": str(highlight_missing(text, word_set)),
     }
 
 
@@ -344,6 +454,8 @@ def index() -> str:
     input_text = ""
     error: Optional[str] = None
     results: Optional[Dict[str, object]] = None
+    selected_level = resolve_level(request.form.get("level") if request.method == "POST" else None)
+    word_set = get_word_set(selected_level)
 
     if request.method == "POST":
         file_storage = request.files.get("text_file")
@@ -362,28 +474,31 @@ def index() -> str:
         if not error:
             if not input_text.strip():
                 error = "Please upload a text file or paste some text."
-            elif not CET4_WORDS:
-                error = "CET4 word list not found."
+            elif not word_set:
+                error = "Word list not found for the selected level."
             else:
-                results = build_results(input_text)
+                results = build_results(input_text, word_set)
 
     return render_template(
         "index.html",
         input_text=input_text,
         error=error,
         results=results,
+        level_options=available_levels(),
+        selected_level=selected_level,
     )
 
 
 @app.route("/check", methods=["POST"])
 def check() -> tuple[str, int]:
-    if not CET4_WORDS:
-        return jsonify({"error": "CET4 word list not found."}), 500
-
     data = request.get_json(silent=True) or {}
     text = data.get("text", "")
     if not isinstance(text, str):
         text = ""
+    level = resolve_level(data.get("level"))
+    word_set = get_word_set(level)
+    if not word_set:
+        return jsonify({"error": "Word list not found for selected level."}), 500
 
     if not text.strip():
         return (
@@ -400,18 +515,20 @@ def check() -> tuple[str, int]:
             200,
         )
 
-    results = build_api_results(text)
+    results = build_api_results(text, word_set)
+    results["level"] = level
     return jsonify(results), 200
 
 
 @app.route("/extract", methods=["POST"])
 def extract() -> tuple[str, int]:
-    if not CET4_WORDS:
-        return jsonify({"error": "CET4 word list not found."}), 500
-
     file_storage = request.files.get("text_file")
     if not file_storage or not file_storage.filename:
         return jsonify({"error": "No file uploaded."}), 400
+    level = resolve_level(request.form.get("level"))
+    word_set = get_word_set(level)
+    if not word_set:
+        return jsonify({"error": "Word list not found for selected level."}), 500
 
     suffix = Path(file_storage.filename).suffix.lower()
     if suffix not in SUPPORTED_EXTENSIONS:
@@ -422,9 +539,50 @@ def extract() -> tuple[str, int]:
     except Exception:
         return jsonify({"error": "Failed to parse the file."}), 400
 
-    results = build_api_results(text)
+    results = build_api_results(text, word_set)
     results["text"] = text
+    results["level"] = level
     return jsonify(results), 200
+
+
+@app.route("/export/pdf", methods=["POST"])
+def export_pdf():
+    data = request.get_json(silent=True) or {}
+    text = data.get("text", "")
+    level = resolve_level(data.get("level"))
+    word_set = get_word_set(level)
+    if not word_set:
+        return jsonify({"error": "Word list not found for selected level."}), 500
+    if not isinstance(text, str) or not text.strip():
+        return jsonify({"error": "No text provided."}), 400
+
+    output = build_pdf_bytes(text, word_set)
+    return send_file(
+        output,
+        mimetype="application/pdf",
+        as_attachment=True,
+        download_name="cet4-highlighted.pdf",
+    )
+
+
+@app.route("/export/docx", methods=["POST"])
+def export_docx():
+    data = request.get_json(silent=True) or {}
+    text = data.get("text", "")
+    level = resolve_level(data.get("level"))
+    word_set = get_word_set(level)
+    if not word_set:
+        return jsonify({"error": "Word list not found for selected level."}), 500
+    if not isinstance(text, str) or not text.strip():
+        return jsonify({"error": "No text provided."}), 400
+
+    output = build_docx_bytes(text, word_set)
+    return send_file(
+        output,
+        mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        as_attachment=True,
+        download_name="cet4-highlighted.docx",
+    )
 
 
 if __name__ == "__main__":

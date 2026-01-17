@@ -105,6 +105,15 @@
         font-family: "Courier New", monospace;
         font-size: 14px;
       }
+      select {
+        width: 100%;
+        padding: 10px 12px;
+        border-radius: 10px;
+        border: 1px solid #d7d1c7;
+        background: #fbfaf8;
+        font-family: "Source Sans 3", "Trebuchet MS", "Calibri", sans-serif;
+        font-size: 14px;
+      }
       .input-shell {
         position: relative;
         min-height: 220px;
@@ -272,7 +281,7 @@
           <p>Upload a file or paste text to find words outside the CET4 list, then refine with the highlighted view.</p>
         </div>
         <div class="hero-card">
-          Upload .txt, .docx, or .pdf files to get a clean list of non-CET4 words, plus inline highlights for fast editing.
+          Upload .txt, .docx, or .pdf files to get a clean list of non-CET4 or non-CET6 words, plus inline highlights for fast editing.
         </div>
       </header>
 
@@ -280,6 +289,13 @@
         <label for="text_file">Upload a .txt, .docx, or .pdf file (optional)</label>
         <input id="text_file" name="text_file" type="file" accept=".txt,.docx,.pdf">
         <span class="note">If a file is uploaded, the pasted text below is ignored.</span>
+
+        <label for="level">Vocabulary level</label>
+        <select id="level" name="level">
+          {% for value, label in level_options %}
+            <option value="{{ value }}" {% if value == selected_level %}selected{% endif %}>{{ label }}</option>
+          {% endfor %}
+        </select>
 
         <label for="text_input">Paste text (optional)</label>
         <div class="input-shell">
@@ -336,7 +352,9 @@
           </div>
 
           <div class="actions">
-            <button id="download_btn" type="button" class="secondary" disabled>Download highlighted HTML</button>
+            <button id="download_btn_html" type="button" class="secondary" disabled>Download highlighted HTML</button>
+            <button id="download_btn_pdf" type="button" class="secondary" disabled>Download highlighted PDF</button>
+            <button id="download_btn_docx" type="button" class="secondary" disabled>Download highlighted DOCX</button>
           </div>
         </section>
 
@@ -344,6 +362,7 @@
         const textInput = document.getElementById('text_input');
         const highlightLayer = document.getElementById('highlight_layer');
         const fileInput = document.getElementById('text_file');
+        const levelSelect = document.getElementById('level');
         const resultsSection = document.getElementById('results');
         const statTotal = document.getElementById('stat_total');
         const statMissing = document.getElementById('stat_missing');
@@ -353,7 +372,9 @@
         const missingTable = document.getElementById('missing_table_body');
         const uniqueList = document.getElementById('unique_list');
         const clientError = document.getElementById('client_error');
-        const downloadButton = document.getElementById('download_btn');
+        const downloadHtmlButton = document.getElementById('download_btn_html');
+        const downloadPdfButton = document.getElementById('download_btn_pdf');
+        const downloadDocxButton = document.getElementById('download_btn_docx');
 
         let debounceTimer = null;
         let lastRequestId = 0;
@@ -379,6 +400,18 @@
           highlightLayer.scrollLeft = textInput.scrollLeft;
         }
 
+        function setDownloadState(enabled) {
+          if (downloadHtmlButton) {
+            downloadHtmlButton.disabled = !enabled;
+          }
+          if (downloadPdfButton) {
+            downloadPdfButton.disabled = !enabled;
+          }
+          if (downloadDocxButton) {
+            downloadDocxButton.disabled = !enabled;
+          }
+        }
+
         function clearResults() {
           statTotal.textContent = '0';
           statMissing.textContent = '0';
@@ -388,9 +421,7 @@
           allGood.style.display = 'none';
           resultsDetail.style.display = 'none';
           resultsSection.style.display = 'none';
-          if (downloadButton) {
-            downloadButton.disabled = true;
-          }
+          setDownloadState(false);
         }
 
         function updateResults(data) {
@@ -425,9 +456,7 @@
 
           uniqueList.value = data.unique_list || '';
           highlightLayer.innerHTML = data.highlighted || '';
-          if (downloadButton) {
-            downloadButton.disabled = !textInput.value.trim();
-          }
+          setDownloadState(!!textInput.value.trim());
           syncScroll();
         }
 
@@ -445,7 +474,7 @@
             const response = await fetch('/check', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ text })
+              body: JSON.stringify({ text, level: levelSelect ? levelSelect.value : 'cet4' })
             });
             if (!response.ok) {
               throw new Error('Request failed');
@@ -471,6 +500,15 @@
 
         textInput.addEventListener('scroll', syncScroll);
 
+        if (levelSelect) {
+          levelSelect.addEventListener('change', () => {
+            if (debounceTimer) {
+              clearTimeout(debounceTimer);
+            }
+            debounceTimer = setTimeout(runCheck, 150);
+          });
+        }
+
         function buildExportHtml(highlightedHtml) {
           return `<!doctype html>
 <html lang="en">
@@ -489,7 +527,7 @@
 </html>`;
         }
 
-        function downloadHighlighted() {
+        function downloadHighlightedHtml() {
           if (!textInput.value.trim()) {
             return;
           }
@@ -505,8 +543,42 @@
           URL.revokeObjectURL(url);
         }
 
-        if (downloadButton) {
-          downloadButton.addEventListener('click', downloadHighlighted);
+        async function downloadFromServer(endpoint, filename) {
+          if (!textInput.value.trim()) {
+            return;
+          }
+          try {
+            const response = await fetch(endpoint, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ text: textInput.value, level: levelSelect ? levelSelect.value : 'cet4' })
+            });
+            if (!response.ok) {
+              const data = await response.json().catch(() => ({}));
+              throw new Error(data.error || 'Export failed.');
+            }
+            const blob = await response.blob();
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = filename;
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+            URL.revokeObjectURL(url);
+          } catch (error) {
+            showClientError(error.message || 'Export failed.');
+          }
+        }
+
+        if (downloadHtmlButton) {
+          downloadHtmlButton.addEventListener('click', downloadHighlightedHtml);
+        }
+        if (downloadPdfButton) {
+          downloadPdfButton.addEventListener('click', () => downloadFromServer('/export/pdf', 'cet4-highlighted.pdf'));
+        }
+        if (downloadDocxButton) {
+          downloadDocxButton.addEventListener('click', () => downloadFromServer('/export/docx', 'cet4-highlighted.docx'));
         }
 
         if (fileInput) {
@@ -516,6 +588,9 @@
             try {
               const formData = new FormData();
               formData.append('text_file', file);
+              if (levelSelect) {
+                formData.append('level', levelSelect.value);
+              }
               const response = await fetch('/extract', {
                 method: 'POST',
                 body: formData
