@@ -114,15 +114,8 @@
         font-family: "Source Sans 3", "Trebuchet MS", "Calibri", sans-serif;
         font-size: 14px;
       }
-      .toggle-row {
-        display: flex;
-        align-items: center;
-        gap: 10px;
-        margin-top: 12px;
-      }
-      .toggle-row input[type="checkbox"] {
-        width: 16px;
-        height: 16px;
+      .wordlist-text {
+        min-height: 120px;
       }
       .input-shell {
         position: relative;
@@ -291,7 +284,7 @@
           <p>Select CET4 or CET6 to find words outside the list, then refine with the highlighted view.</p>
         </div>
         <div class="hero-card">
-          Upload .txt, .docx, or .pdf files to get a clean list of out-of-level words, plus inline highlights for fast editing.
+          Upload .txt, .docx, or .pdf files and filter with CET4, CET6, or your own word list.
         </div>
       </header>
 
@@ -306,10 +299,11 @@
             <option value="{{ value }}" {% if value == selected_level %}selected{% endif %}>{{ label }}</option>
           {% endfor %}
         </select>
-        <div class="toggle-row">
-          <input id="suggestions" name="suggestions" type="checkbox" {% if results and results.suggestions_enabled %}checked{% endif %}>
-          <label for="suggestions" style="margin: 0;">Show synonym suggestions (semantic)</label>
-        </div>
+        <label for="wordlist_file">Upload custom word list (.txt/.csv)</label>
+        <input id="wordlist_file" name="wordlist_file" type="file" accept=".txt,.csv">
+        <span class="note">One word per line (or a CSV with a single word column). Used only when level is Custom.</span>
+        <label for="wordlist_text">Or paste custom word list (optional)</label>
+        <textarea id="wordlist_text" name="wordlist_text" class="wordlist-text" placeholder="one word per line">{{ wordlist_text }}</textarea>
 
         <label for="text_input">Paste text (optional)</label>
         <div class="input-shell">
@@ -347,7 +341,6 @@
                 <tr>
                   <th>Word</th>
                   <th>Count</th>
-                  <th class="suggestions-col">Suggestions</th>
                 </tr>
               </thead>
               <tbody id="missing_table_body">
@@ -356,11 +349,6 @@
                     <tr>
                       <td>{{ item.word }}</td>
                       <td>{{ item.count }}</td>
-                      <td class="suggestions-col">
-                        {% if item.suggestions %}
-                          {{ item.suggestions | join(", ") }}
-                        {% endif %}
-                      </td>
                     </tr>
                   {% endfor %}
                 {% endif %}
@@ -383,7 +371,8 @@
         const highlightLayer = document.getElementById('highlight_layer');
         const fileInput = document.getElementById('text_file');
         const levelSelect = document.getElementById('level');
-        const suggestionsToggle = document.getElementById('suggestions');
+        const wordlistFileInput = document.getElementById('wordlist_file');
+        const wordlistTextInput = document.getElementById('wordlist_text');
         const resultsSection = document.getElementById('results');
         const statTotal = document.getElementById('stat_total');
         const statMissing = document.getElementById('stat_missing');
@@ -401,6 +390,7 @@
 
         let debounceTimer = null;
         let lastRequestId = 0;
+        let customWordsText = '';
 
         function renderPlain(text) {
           highlightLayer.textContent = text;
@@ -445,7 +435,6 @@
           resultsDetail.style.display = 'none';
           resultsSection.style.display = 'none';
           setDownloadState(false);
-          toggleSuggestions(false);
         }
 
         function updateLevelLabels() {
@@ -459,19 +448,12 @@
           }
         }
 
-        function toggleSuggestions(show) {
-          document.querySelectorAll('.suggestions-col').forEach((col) => {
-            col.style.display = show ? '' : 'none';
-          });
-        }
-
         function updateResults(data) {
           clearClientError();
           statTotal.textContent = data.total_count;
           statMissing.textContent = data.missing_count;
           statUnique.textContent = data.unique_missing;
           updateLevelLabels();
-          toggleSuggestions(!!data.suggestions_enabled);
 
           resultsSection.style.display = 'block';
 
@@ -489,21 +471,16 @@
               const row = document.createElement('tr');
               const wordCell = document.createElement('td');
               const countCell = document.createElement('td');
-              const suggestionsCell = document.createElement('td');
               wordCell.textContent = item.word;
               countCell.textContent = item.count;
-              suggestionsCell.textContent = Array.isArray(item.suggestions) ? item.suggestions.join(', ') : '';
-              suggestionsCell.className = 'suggestions-col';
               row.appendChild(wordCell);
               row.appendChild(countCell);
-              row.appendChild(suggestionsCell);
               missingTable.appendChild(row);
             });
           }
 
           uniqueList.value = data.unique_list || '';
           highlightLayer.innerHTML = data.highlighted || '';
-          toggleSuggestions(!!data.suggestions_enabled);
           setDownloadState(!!textInput.value.trim());
           syncScroll();
         }
@@ -516,16 +493,22 @@
             clearClientError();
             return;
           }
+          if (levelSelect && levelSelect.value === 'custom' && !customWordsText.trim()) {
+            renderPlain(text);
+            clearResults();
+            showClientError('Please upload or paste a custom word list.');
+            return;
+          }
 
           const requestId = ++lastRequestId;
           try {
-          const response = await fetch('/check', {
+            const response = await fetch('/check', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
                 text,
                 level: levelSelect ? levelSelect.value : 'cet4',
-                suggestions: suggestionsToggle ? suggestionsToggle.checked : false
+                custom_words: customWordsText
               })
             });
             if (!response.ok) {
@@ -561,12 +544,15 @@
             updateLevelLabels();
           });
         }
-        if (suggestionsToggle) {
-          suggestionsToggle.addEventListener('change', () => {
-            if (debounceTimer) {
-              clearTimeout(debounceTimer);
+        if (wordlistTextInput) {
+          wordlistTextInput.addEventListener('input', () => {
+            customWordsText = wordlistTextInput.value;
+            if (levelSelect && levelSelect.value === 'custom') {
+              if (debounceTimer) {
+                clearTimeout(debounceTimer);
+              }
+              debounceTimer = setTimeout(runCheck, 150);
             }
-            debounceTimer = setTimeout(runCheck, 150);
           });
         }
 
@@ -604,15 +590,59 @@
           URL.revokeObjectURL(url);
         }
 
+        function decodeBuffer(buffer) {
+          let decoded = '';
+          try {
+            decoded = new TextDecoder('utf-8', { fatal: false }).decode(buffer);
+          } catch (error) {
+            decoded = '';
+          }
+          if (decoded.includes('\uFFFD')) {
+            try {
+              decoded = new TextDecoder('gbk', { fatal: false }).decode(buffer);
+            } catch (error) {
+              decoded = decoded.replace(/\uFFFD/g, '');
+            }
+          }
+          return decoded;
+        }
+
+        if (wordlistFileInput) {
+          wordlistFileInput.addEventListener('change', async (event) => {
+            const file = event.target.files[0];
+            if (!file) return;
+            try {
+              const buffer = await file.arrayBuffer();
+              customWordsText = decodeBuffer(buffer);
+              if (wordlistTextInput) {
+                wordlistTextInput.value = customWordsText;
+              }
+              if (levelSelect && levelSelect.value === 'custom') {
+                runCheck();
+              }
+            } catch (error) {
+              showClientError('Failed to read the word list file.');
+            }
+          });
+        }
+
         async function downloadFromServer(endpoint, filename) {
           if (!textInput.value.trim()) {
+            return;
+          }
+          if (levelSelect && levelSelect.value === 'custom' && !customWordsText.trim()) {
+            showClientError('Please upload or paste a custom word list.');
             return;
           }
           try {
             const response = await fetch(endpoint, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ text: textInput.value, level: levelSelect ? levelSelect.value : 'cet4' })
+              body: JSON.stringify({
+                text: textInput.value,
+                level: levelSelect ? levelSelect.value : 'cet4',
+                custom_words: customWordsText
+              })
             });
             if (!response.ok) {
               const data = await response.json().catch(() => ({}));
@@ -652,8 +682,8 @@
               if (levelSelect) {
                 formData.append('level', levelSelect.value);
               }
-              if (suggestionsToggle) {
-                formData.append('suggestions', suggestionsToggle.checked ? 'true' : 'false');
+              if (customWordsText) {
+                formData.append('custom_words', customWordsText);
               }
               const response = await fetch('/extract', {
                 method: 'POST',
@@ -675,10 +705,8 @@
           });
         }
 
-        const initialSuggestions = {{ 'true' if results and results.suggestions_enabled else 'false' }};
-        toggleSuggestions(initialSuggestions);
-        if (suggestionsToggle) {
-          suggestionsToggle.checked = initialSuggestions;
+        if (wordlistTextInput && wordlistTextInput.value.trim()) {
+          customWordsText = wordlistTextInput.value;
         }
 
         if (textInput.value.trim()) {

@@ -9,8 +9,6 @@ from docx import Document
 from docx.enum.text import WD_COLOR_INDEX
 from flask import Flask, jsonify, render_template, request, send_file
 from markupsafe import Markup, escape
-import nltk
-from nltk.corpus import wordnet as wn
 from pypdf import PdfReader
 from reportlab.lib.pagesizes import LETTER
 from reportlab.lib.styles import ParagraphStyle
@@ -21,7 +19,7 @@ CET4_FILE = Path(__file__).resolve().parent / "wordscheck" / "CET4_words_from_CE
 CET6_FILE = Path(__file__).resolve().parent / "wordscheck" / "CET4+6_expanded_words_7952.csv"
 TOKEN_RE = re.compile(r"[A-Za-z]+(?:[-'][A-Za-z]+)*")
 SUPPORTED_EXTENSIONS = {".txt", ".docx", ".pdf"}
-NLTK_DATA_DIR = Path(__file__).resolve().parent / "nltk_data"
+WORDLIST_EXTENSIONS = {".txt", ".csv"}
 
 TRANSLATION_TABLE = str.maketrans(
     {
@@ -207,6 +205,25 @@ def load_word_list(word_file: Path) -> Set[str]:
                     words.add(normalized.replace("-", ""))
     return words
 
+
+def parse_word_list_text(text: str) -> Set[str]:
+    words: Set[str] = set()
+    for line in text.splitlines():
+        entry = line.strip().lstrip("\ufeff")
+        if not entry:
+            continue
+        entry = entry.split(",", 1)[0].strip()
+        if not entry or entry.lower() == "word":
+            continue
+        for variant in expand_entry(entry):
+            normalized = normalize_word(variant)
+            if not normalized:
+                continue
+            words.add(normalized)
+            if "-" in normalized:
+                words.add(normalized.replace("-", ""))
+    return words
+
 def build_word_sets() -> Dict[str, Set[str]]:
     sets: Dict[str, Set[str]] = {}
     if CET4_FILE.exists():
@@ -221,13 +238,7 @@ def build_word_sets() -> Dict[str, Set[str]]:
 
 
 WORD_SETS = build_word_sets()
-WORD_LISTS = {level: sorted(words) for level, words in WORD_SETS.items()}
-WORD_RANKS = {
-    level: {word: index for index, word in enumerate(word_list)}
-    for level, word_list in WORD_LISTS.items()
-}
 DEFAULT_LEVEL = "cet4"
-WORDNET_READY = False
 
 
 def available_levels() -> List[Tuple[str, str]]:
@@ -236,12 +247,15 @@ def available_levels() -> List[Tuple[str, str]]:
         options.append(("cet4", "CET4"))
     if "cet6" in WORD_SETS:
         options.append(("cet6", "CET6 (CET4+6)"))
+    options.append(("custom", "Custom word list"))
     return options
 
 
 def resolve_level(level: Optional[str]) -> str:
     if level in WORD_SETS:
         return level
+    if level == "custom":
+        return "custom"
     if DEFAULT_LEVEL in WORD_SETS:
         return DEFAULT_LEVEL
     return next(iter(WORD_SETS), "")
@@ -251,33 +265,19 @@ def get_word_set(level: str) -> Optional[Set[str]]:
     return WORD_SETS.get(level)
 
 
-def get_word_list(level: str) -> List[str]:
-    return WORD_LISTS.get(level, [])
+def build_custom_word_set(raw_text: str) -> Set[str]:
+    words = parse_word_list_text(raw_text)
+    apply_equivalent_variants(words)
+    return words
 
 
-def get_word_rank(level: str) -> Dict[str, int]:
-    return WORD_RANKS.get(level, {})
-
-
-def ensure_wordnet() -> bool:
-    global WORDNET_READY
-    if WORDNET_READY:
-        return True
-    try:
-        if str(NLTK_DATA_DIR) not in nltk.data.path:
-            nltk.data.path.append(str(NLTK_DATA_DIR))
-        try:
-            nltk.data.find("corpora/wordnet")
-        except LookupError:
-            nltk.download("wordnet", download_dir=str(NLTK_DATA_DIR))
-        try:
-            nltk.data.find("corpora/omw-1.4")
-        except LookupError:
-            nltk.download("omw-1.4", download_dir=str(NLTK_DATA_DIR))
-        WORDNET_READY = True
-        return True
-    except Exception:
-        return False
+def resolve_word_set(level: str, custom_words_text: Optional[str]) -> Optional[Set[str]]:
+    if level == "custom":
+        if not custom_words_text or not custom_words_text.strip():
+            return None
+        words = build_custom_word_set(custom_words_text)
+        return words if words else None
+    return get_word_set(level)
 
 
 def decode_uploaded_text(raw: bytes) -> str:
@@ -315,6 +315,15 @@ def extract_text_from_upload(file_storage) -> str:
         return extract_docx_text(raw)
     if suffix == ".pdf":
         return extract_pdf_text(raw)
+    return ""
+
+
+def extract_word_list_from_upload(file_storage) -> str:
+    filename = (file_storage.filename or "").lower()
+    suffix = Path(filename).suffix
+    raw = file_storage.read()
+    if suffix in WORDLIST_EXTENSIONS:
+        return decode_uploaded_text(raw)
     return ""
 
 
@@ -458,30 +467,6 @@ def is_missing_segment(segment: str, missing_set: Set[str]) -> bool:
     return normalize_segment_token(segment) in missing_set
 
 
-def suggest_replacements(
-    word: str, word_set: Set[str], word_rank: Dict[str, int]
-) -> List[str]:
-    if not word_set or not ensure_wordnet():
-        return []
-    normalized = normalize_token(word)
-    suggestions: Set[str] = set()
-    candidates = generate_candidates(normalized)
-    for base in candidates:
-        for synset in wn.synsets(base):
-            for lemma in synset.lemma_names():
-                lemma_normalized = lemma.replace("_", " ").lower()
-                if " " in lemma_normalized or "-" in lemma_normalized:
-                    continue
-                if not re.fullmatch(r"[a-z]+", lemma_normalized):
-                    continue
-                if lemma_normalized == normalized:
-                    continue
-                if lemma_normalized in word_set:
-                    suggestions.add(lemma_normalized)
-    ranked = sorted(suggestions, key=lambda item: word_rank.get(item, 1_000_000))
-    return ranked[:5]
-
-
 def iter_segments(text: str) -> List[Tuple[str, bool]]:
     normalized = normalize_text(text)
     segments: List[Tuple[str, bool]] = []
@@ -562,17 +547,8 @@ def build_pdf_bytes(text: str, missing_set: Set[str]) -> BytesIO:
     return output
 
 
-def build_api_results(
-    text: str, word_set: Set[str], include_suggestions: bool, word_rank: Dict[str, int]
-) -> Dict[str, object]:
-    results = build_results(text, word_set)
-    if include_suggestions:
-        for item in results["missing_items"]:
-            item["suggestions"] = suggest_replacements(item["word"], word_set, word_rank)
-        results["suggestions_enabled"] = True
-    else:
-        results["suggestions_enabled"] = False
-    return results
+def build_api_results(text: str, word_set: Set[str]) -> Dict[str, object]:
+    return build_results(text, word_set)
 
 
 def build_results(text: str, word_set: Set[str]) -> Dict[str, object]:
@@ -589,7 +565,6 @@ def build_results(text: str, word_set: Set[str]) -> Dict[str, object]:
         "missing_items": missing_rows,
         "unique_list": "\n".join(word for word, _ in missing_items),
         "highlighted": str(highlight_missing(text, missing_set)),
-        "suggestions_enabled": False,
     }
 
 
@@ -599,12 +574,22 @@ def index() -> str:
     error: Optional[str] = None
     results: Optional[Dict[str, object]] = None
     selected_level = resolve_level(request.form.get("level") if request.method == "POST" else None)
-    word_set = get_word_set(selected_level)
-    include_suggestions = request.form.get("suggestions") in {"on", "true"}
-    word_rank = get_word_rank(selected_level)
+    custom_words_text = ""
 
     if request.method == "POST":
         file_storage = request.files.get("text_file")
+        wordlist_storage = request.files.get("wordlist_file")
+        custom_words_text = request.form.get("wordlist_text", "")
+        if wordlist_storage and wordlist_storage.filename:
+            suffix = Path(wordlist_storage.filename).suffix.lower()
+            if suffix not in WORDLIST_EXTENSIONS:
+                error = "Unsupported word list type. Please upload a .txt or .csv file."
+            else:
+                try:
+                    custom_words_text = extract_word_list_from_upload(wordlist_storage)
+                except Exception:
+                    error = "Failed to parse the word list. Please try another file."
+
         if file_storage and file_storage.filename:
             suffix = Path(file_storage.filename).suffix.lower()
             if suffix not in SUPPORTED_EXTENSIONS:
@@ -618,14 +603,15 @@ def index() -> str:
             input_text = request.form.get("text_input", "")
 
         if not error:
+            word_set = resolve_word_set(
+                selected_level, custom_words_text if selected_level == "custom" else None
+            )
             if not input_text.strip():
                 error = "Please upload a text file or paste some text."
             elif not word_set:
                 error = "Word list not found for the selected level."
             else:
-                results = build_api_results(
-                    input_text, word_set, include_suggestions, word_rank
-                )
+                results = build_api_results(input_text, word_set)
 
     return render_template(
         "index.html",
@@ -634,6 +620,7 @@ def index() -> str:
         results=results,
         level_options=available_levels(),
         selected_level=selected_level,
+        wordlist_text=custom_words_text,
     )
 
 
@@ -644,9 +631,8 @@ def check() -> tuple[str, int]:
     if not isinstance(text, str):
         text = ""
     level = resolve_level(data.get("level"))
-    include_suggestions = bool(data.get("suggestions"))
-    word_set = get_word_set(level)
-    word_rank = get_word_rank(level)
+    custom_words_text = data.get("custom_words", "")
+    word_set = resolve_word_set(level, custom_words_text if level == "custom" else None)
     if not word_set:
         return jsonify({"error": "Word list not found for selected level."}), 500
 
@@ -660,13 +646,12 @@ def check() -> tuple[str, int]:
                     "missing_items": [],
                     "unique_list": "",
                     "highlighted": str(escape(text)),
-                    "suggestions_enabled": False,
                 }
             ),
             200,
         )
 
-    results = build_api_results(text, word_set, include_suggestions, word_rank)
+    results = build_api_results(text, word_set)
     results["level"] = level
     return jsonify(results), 200
 
@@ -677,9 +662,8 @@ def extract() -> tuple[str, int]:
     if not file_storage or not file_storage.filename:
         return jsonify({"error": "No file uploaded."}), 400
     level = resolve_level(request.form.get("level"))
-    include_suggestions = request.form.get("suggestions") in {"true", "on"}
-    word_set = get_word_set(level)
-    word_rank = get_word_rank(level)
+    custom_words_text = request.form.get("custom_words", "")
+    word_set = resolve_word_set(level, custom_words_text if level == "custom" else None)
     if not word_set:
         return jsonify({"error": "Word list not found for selected level."}), 500
 
@@ -692,7 +676,7 @@ def extract() -> tuple[str, int]:
     except Exception:
         return jsonify({"error": "Failed to parse the file."}), 400
 
-    results = build_api_results(text, word_set, include_suggestions, word_rank)
+    results = build_api_results(text, word_set)
     results["text"] = text
     results["level"] = level
     return jsonify(results), 200
@@ -703,7 +687,8 @@ def export_pdf():
     data = request.get_json(silent=True) or {}
     text = data.get("text", "")
     level = resolve_level(data.get("level"))
-    word_set = get_word_set(level)
+    custom_words_text = data.get("custom_words", "")
+    word_set = resolve_word_set(level, custom_words_text if level == "custom" else None)
     if not word_set:
         return jsonify({"error": "Word list not found for selected level."}), 500
     if not isinstance(text, str) or not text.strip():
@@ -725,7 +710,8 @@ def export_docx():
     data = request.get_json(silent=True) or {}
     text = data.get("text", "")
     level = resolve_level(data.get("level"))
-    word_set = get_word_set(level)
+    custom_words_text = data.get("custom_words", "")
+    word_set = resolve_word_set(level, custom_words_text if level == "custom" else None)
     if not word_set:
         return jsonify({"error": "Word list not found for selected level."}), 500
     if not isinstance(text, str) or not text.strip():
