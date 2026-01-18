@@ -521,7 +521,15 @@ def suggest_replacements(
     suggestions: Set[str] = set()
     candidates = generate_candidates(normalized)
     for base in candidates:
-        for synset in wn.synsets(base):
+        if not re.fullmatch(r"[a-z]+", base):
+            continue
+        try:
+            synsets = wn.synsets(base)
+        except LookupError:
+            return []
+        except Exception:
+            continue
+        for synset in synsets:
             for lemma in synset.lemma_names():
                 lemma_normalized = lemma.replace("_", " ").lower()
                 if lemma_normalized == normalized:
@@ -633,9 +641,14 @@ def build_api_results(
 ) -> Dict[str, object]:
     results = build_results(text, word_set)
     if include_suggestions:
-        for item in results["missing_items"]:
-            item["suggestions"] = suggest_replacements(item["word"], word_set, word_rank)
-        results["suggestions_enabled"] = True
+        try:
+            for item in results["missing_items"]:
+                item["suggestions"] = suggest_replacements(
+                    item["word"], word_set, word_rank
+                )
+            results["suggestions_enabled"] = True
+        except Exception:
+            results["suggestions_enabled"] = False
     else:
         results["suggestions_enabled"] = False
     return results
