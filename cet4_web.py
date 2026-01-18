@@ -9,6 +9,8 @@ from docx import Document
 from docx.enum.text import WD_COLOR_INDEX
 from flask import Flask, jsonify, render_template, request, send_file
 from markupsafe import Markup, escape
+import nltk
+from nltk.corpus import wordnet as wn
 from pypdf import PdfReader
 from reportlab.lib.pagesizes import LETTER
 from reportlab.lib.styles import ParagraphStyle
@@ -20,6 +22,7 @@ CET6_FILE = Path(__file__).resolve().parent / "wordscheck" / "CET4+6_expanded_wo
 TOKEN_RE = re.compile(r"[A-Za-z]+(?:[-'][A-Za-z]+)*")
 SUPPORTED_EXTENSIONS = {".txt", ".docx", ".pdf"}
 WORDLIST_EXTENSIONS = {".txt", ".csv"}
+NLTK_DATA_DIR = Path(__file__).resolve().parent / "nltk_data"
 
 TRANSLATION_TABLE = str.maketrans(
     {
@@ -238,7 +241,13 @@ def build_word_sets() -> Dict[str, Set[str]]:
 
 
 WORD_SETS = build_word_sets()
+WORD_LISTS = {level: sorted(words) for level, words in WORD_SETS.items()}
+WORD_RANKS = {
+    level: {word: index for index, word in enumerate(word_list)}
+    for level, word_list in WORD_LISTS.items()
+}
 DEFAULT_LEVEL = "cet4"
+WORDNET_READY = False
 
 
 def available_levels() -> List[Tuple[str, str]]:
@@ -265,19 +274,55 @@ def get_word_set(level: str) -> Optional[Set[str]]:
     return WORD_SETS.get(level)
 
 
+def get_word_rank(level: str) -> Dict[str, int]:
+    return WORD_RANKS.get(level, {})
+
+
+def build_word_rank(word_set: Set[str]) -> Dict[str, int]:
+    return {word: index for index, word in enumerate(sorted(word_set))}
+
+
+def ensure_wordnet() -> bool:
+    global WORDNET_READY
+    if WORDNET_READY:
+        return True
+    try:
+        if str(NLTK_DATA_DIR) not in nltk.data.path:
+            nltk.data.path.append(str(NLTK_DATA_DIR))
+        try:
+            nltk.data.find("corpora/wordnet")
+        except LookupError:
+            nltk.download("wordnet", download_dir=str(NLTK_DATA_DIR))
+        try:
+            nltk.data.find("corpora/omw-1.4")
+        except LookupError:
+            nltk.download("omw-1.4", download_dir=str(NLTK_DATA_DIR))
+        WORDNET_READY = True
+        return True
+    except Exception:
+        return False
+
+
 def build_custom_word_set(raw_text: str) -> Set[str]:
     words = parse_word_list_text(raw_text)
     apply_equivalent_variants(words)
     return words
 
 
-def resolve_word_set(level: str, custom_words_text: Optional[str]) -> Optional[Set[str]]:
+def resolve_word_context(
+    level: str, custom_words_text: Optional[str]
+) -> Tuple[Optional[Set[str]], Dict[str, int]]:
     if level == "custom":
         if not custom_words_text or not custom_words_text.strip():
-            return None
-        words = build_custom_word_set(custom_words_text)
-        return words if words else None
-    return get_word_set(level)
+            return None, {}
+        custom_set = build_custom_word_set(custom_words_text)
+        if not custom_set:
+            return None, {}
+        return custom_set, build_word_rank(custom_set)
+    word_set = get_word_set(level)
+    if not word_set:
+        return None, {}
+    return word_set, get_word_rank(level)
 
 
 def decode_uploaded_text(raw: bytes) -> str:
@@ -467,6 +512,42 @@ def is_missing_segment(segment: str, missing_set: Set[str]) -> bool:
     return normalize_segment_token(segment) in missing_set
 
 
+def suggest_replacements(
+    word: str, word_set: Set[str], word_rank: Dict[str, int]
+) -> List[str]:
+    if not word_set or not ensure_wordnet():
+        return []
+    normalized = normalize_token(word)
+    suggestions: Set[str] = set()
+    candidates = generate_candidates(normalized)
+    for base in candidates:
+        for synset in wn.synsets(base):
+            for lemma in synset.lemma_names():
+                lemma_normalized = lemma.replace("_", " ").lower()
+                if lemma_normalized == normalized:
+                    continue
+                if not re.fullmatch(r"[a-z\\- ]+", lemma_normalized):
+                    continue
+                tokens = [token for token in re.split(r"[\\s-]+", lemma_normalized) if token]
+                if not tokens:
+                    continue
+                if len(tokens) == 1:
+                    if is_known_word(tokens[0], word_set):
+                        suggestions.add(lemma_normalized)
+                    continue
+                if all(is_known_word(token, word_set) for token in tokens):
+                    suggestions.add(lemma_normalized)
+    ranked = sorted(
+        suggestions,
+        key=lambda item: (
+            sum(word_rank.get(token, 1_000_000) for token in re.split(r"[\\s-]+", item))
+            / max(len(re.split(r"[\\s-]+", item)), 1),
+            len(item),
+        ),
+    )
+    return ranked[:8]
+
+
 def iter_segments(text: str) -> List[Tuple[str, bool]]:
     normalized = normalize_text(text)
     segments: List[Tuple[str, bool]] = []
@@ -547,8 +628,17 @@ def build_pdf_bytes(text: str, missing_set: Set[str]) -> BytesIO:
     return output
 
 
-def build_api_results(text: str, word_set: Set[str]) -> Dict[str, object]:
-    return build_results(text, word_set)
+def build_api_results(
+    text: str, word_set: Set[str], include_suggestions: bool, word_rank: Dict[str, int]
+) -> Dict[str, object]:
+    results = build_results(text, word_set)
+    if include_suggestions:
+        for item in results["missing_items"]:
+            item["suggestions"] = suggest_replacements(item["word"], word_set, word_rank)
+        results["suggestions_enabled"] = True
+    else:
+        results["suggestions_enabled"] = False
+    return results
 
 
 def build_results(text: str, word_set: Set[str]) -> Dict[str, object]:
@@ -575,6 +665,7 @@ def index() -> str:
     results: Optional[Dict[str, object]] = None
     selected_level = resolve_level(request.form.get("level") if request.method == "POST" else None)
     custom_words_text = ""
+    include_suggestions = request.form.get("suggestions") in {"on", "true"}
 
     if request.method == "POST":
         file_storage = request.files.get("text_file")
@@ -603,15 +694,19 @@ def index() -> str:
             input_text = request.form.get("text_input", "")
 
         if not error:
-            word_set = resolve_word_set(
+            word_set, word_rank = resolve_word_context(
                 selected_level, custom_words_text if selected_level == "custom" else None
             )
             if not input_text.strip():
                 error = "Please upload a text file or paste some text."
+            elif selected_level == "custom" and not custom_words_text.strip():
+                error = "Please upload or paste a custom word list."
             elif not word_set:
                 error = "Word list not found for the selected level."
             else:
-                results = build_api_results(input_text, word_set)
+                results = build_api_results(
+                    input_text, word_set, include_suggestions, word_rank
+                )
 
     return render_template(
         "index.html",
@@ -621,6 +716,7 @@ def index() -> str:
         level_options=available_levels(),
         selected_level=selected_level,
         wordlist_text=custom_words_text,
+        suggestions_enabled=include_suggestions,
     )
 
 
@@ -631,9 +727,14 @@ def check() -> tuple[str, int]:
     if not isinstance(text, str):
         text = ""
     level = resolve_level(data.get("level"))
+    include_suggestions = bool(data.get("suggestions"))
     custom_words_text = data.get("custom_words", "")
-    word_set = resolve_word_set(level, custom_words_text if level == "custom" else None)
+    word_set, word_rank = resolve_word_context(
+        level, custom_words_text if level == "custom" else None
+    )
     if not word_set:
+        if level == "custom":
+            return jsonify({"error": "Please upload or paste a custom word list."}), 400
         return jsonify({"error": "Word list not found for selected level."}), 500
 
     if not text.strip():
@@ -646,12 +747,13 @@ def check() -> tuple[str, int]:
                     "missing_items": [],
                     "unique_list": "",
                     "highlighted": str(escape(text)),
+                    "suggestions_enabled": False,
                 }
             ),
             200,
         )
 
-    results = build_api_results(text, word_set)
+    results = build_api_results(text, word_set, include_suggestions, word_rank)
     results["level"] = level
     return jsonify(results), 200
 
@@ -663,8 +765,13 @@ def extract() -> tuple[str, int]:
         return jsonify({"error": "No file uploaded."}), 400
     level = resolve_level(request.form.get("level"))
     custom_words_text = request.form.get("custom_words", "")
-    word_set = resolve_word_set(level, custom_words_text if level == "custom" else None)
+    include_suggestions = request.form.get("suggestions") in {"true", "on"}
+    word_set, word_rank = resolve_word_context(
+        level, custom_words_text if level == "custom" else None
+    )
     if not word_set:
+        if level == "custom":
+            return jsonify({"error": "Please upload or paste a custom word list."}), 400
         return jsonify({"error": "Word list not found for selected level."}), 500
 
     suffix = Path(file_storage.filename).suffix.lower()
@@ -676,7 +783,7 @@ def extract() -> tuple[str, int]:
     except Exception:
         return jsonify({"error": "Failed to parse the file."}), 400
 
-    results = build_api_results(text, word_set)
+    results = build_api_results(text, word_set, include_suggestions, word_rank)
     results["text"] = text
     results["level"] = level
     return jsonify(results), 200
@@ -688,8 +795,12 @@ def export_pdf():
     text = data.get("text", "")
     level = resolve_level(data.get("level"))
     custom_words_text = data.get("custom_words", "")
-    word_set = resolve_word_set(level, custom_words_text if level == "custom" else None)
+    word_set, _ = resolve_word_context(
+        level, custom_words_text if level == "custom" else None
+    )
     if not word_set:
+        if level == "custom":
+            return jsonify({"error": "Please upload or paste a custom word list."}), 400
         return jsonify({"error": "Word list not found for selected level."}), 500
     if not isinstance(text, str) or not text.strip():
         return jsonify({"error": "No text provided."}), 400
@@ -711,8 +822,12 @@ def export_docx():
     text = data.get("text", "")
     level = resolve_level(data.get("level"))
     custom_words_text = data.get("custom_words", "")
-    word_set = resolve_word_set(level, custom_words_text if level == "custom" else None)
+    word_set, _ = resolve_word_context(
+        level, custom_words_text if level == "custom" else None
+    )
     if not word_set:
+        if level == "custom":
+            return jsonify({"error": "Please upload or paste a custom word list."}), 400
         return jsonify({"error": "Word list not found for selected level."}), 500
     if not isinstance(text, str) or not text.strip():
         return jsonify({"error": "No text provided."}), 400
