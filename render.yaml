@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: cet4-word-checker
+    name: fangpa-yyds
     env: python
     plan: free
     buildCommand: pip install -r requirements.txt && python -m nltk.downloader wordnet omw-1.4 -d nltk_data
