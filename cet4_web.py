@@ -534,9 +534,9 @@ def suggest_replacements(
                 lemma_normalized = lemma.replace("_", " ").lower()
                 if lemma_normalized == normalized:
                     continue
-                if not re.fullmatch(r"[a-z\\- ]+", lemma_normalized):
+                if not re.fullmatch(r"[a-z- ]+", lemma_normalized):
                     continue
-                tokens = [token for token in re.split(r"[\\s-]+", lemma_normalized) if token]
+                tokens = [token for token in re.split(r"[\s-]+", lemma_normalized) if token]
                 if not tokens:
                     continue
                 if len(tokens) == 1:
@@ -548,8 +548,8 @@ def suggest_replacements(
     ranked = sorted(
         suggestions,
         key=lambda item: (
-            sum(word_rank.get(token, 1_000_000) for token in re.split(r"[\\s-]+", item))
-            / max(len(re.split(r"[\\s-]+", item)), 1),
+            sum(word_rank.get(token, 1_000_000) for token in re.split(r"[\s-]+", item))
+            / max(len(re.split(r"[\s-]+", item)), 1),
             len(item),
         ),
     )
@@ -641,16 +641,18 @@ def build_api_results(
 ) -> Dict[str, object]:
     results = build_results(text, word_set)
     if include_suggestions:
-        try:
+        results["suggestions_enabled"] = True
+        if ensure_wordnet():
             for item in results["missing_items"]:
                 item["suggestions"] = suggest_replacements(
                     item["word"], word_set, word_rank
                 )
-            results["suggestions_enabled"] = True
-        except Exception:
-            results["suggestions_enabled"] = False
+            results["suggestions_status"] = "ready"
+        else:
+            results["suggestions_status"] = "unavailable"
     else:
         results["suggestions_enabled"] = False
+        results["suggestions_status"] = "disabled"
     return results
 
 
@@ -760,7 +762,8 @@ def check() -> tuple[str, int]:
                     "missing_items": [],
                     "unique_list": "",
                     "highlighted": str(escape(text)),
-                    "suggestions_enabled": False,
+                    "suggestions_enabled": include_suggestions,
+                    "suggestions_status": "disabled" if not include_suggestions else "empty",
                 }
             ),
             200,

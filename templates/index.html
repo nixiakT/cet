@@ -318,6 +318,7 @@
           <input id="suggestions" name="suggestions" type="checkbox" {% if suggestions_enabled %}checked{% endif %}>
           <label for="suggestions" style="margin: 0;">Show semantic synonym suggestions (words + phrases)</label>
         </div>
+        <div id="suggestions_note" class="note" style="display: none;"></div>
 
         <label for="text_input">Paste text (optional)</label>
         <div class="input-shell">
@@ -394,6 +395,7 @@
         const wordlistFileInput = document.getElementById('wordlist_file');
         const wordlistTextInput = document.getElementById('wordlist_text');
         const suggestionsToggle = document.getElementById('suggestions');
+        const suggestionsNote = document.getElementById('suggestions_note');
         const resultsSection = document.getElementById('results');
         const statTotal = document.getElementById('stat_total');
         const statMissing = document.getElementById('stat_missing');
@@ -457,6 +459,7 @@
           resultsSection.style.display = 'none';
           setDownloadState(false);
           toggleSuggestions(false);
+          updateSuggestionsNote(null);
         }
 
         function updateLevelLabels() {
@@ -476,6 +479,22 @@
           });
         }
 
+        function updateSuggestionsNote(data) {
+          if (!suggestionsNote) return;
+          if (!data || !data.suggestions_enabled) {
+            suggestionsNote.style.display = 'none';
+            suggestionsNote.textContent = '';
+            return;
+          }
+          if (data.suggestions_status === 'unavailable') {
+            suggestionsNote.textContent = '同义词资源未就绪，请稍后再试或重新部署服务。';
+            suggestionsNote.style.display = 'block';
+            return;
+          }
+          suggestionsNote.style.display = 'none';
+          suggestionsNote.textContent = '';
+        }
+
         function updateResults(data) {
           clearClientError();
           statTotal.textContent = data.total_count;
@@ -483,6 +502,7 @@
           statUnique.textContent = data.unique_missing;
           updateLevelLabels();
           toggleSuggestions(!!data.suggestions_enabled);
+          updateSuggestionsNote(data);
 
           resultsSection.style.display = 'block';
 
